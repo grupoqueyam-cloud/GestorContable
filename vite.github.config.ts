@@ -4,5 +4,5 @@ import { defineConfig } from "vite";
 export default defineConfig({
   base: "./",
   plugins: [react()],
-  build: { outDir: "github-pages-dist", emptyOutDir: true, sourcemap: false },
+  build: { outDir: "docs", emptyOutDir: true, sourcemap: false },
 });

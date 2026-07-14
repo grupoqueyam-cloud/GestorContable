@@ -34,7 +34,7 @@ jobs:
       - name: Preparar artefacto
         uses: actions/upload-pages-artifact@v3
         with:
-          path: github-pages-dist
+          path: docs
 
   deploy:
     environment:

@@ -10,7 +10,7 @@
     "build": "vite build --config vite.github.config.ts",
     "start": "vite preview --config vite.github.config.ts",
     "test": "npm run build && node --test tests/rendered-html.test.mjs tests/cloud-only.test.mjs && node --import tsx --test tests/google-sheets-merge.test.ts",
-    "lint": "eslint . --ignore-pattern dist --ignore-pattern .next --ignore-pattern github-pages-dist",
+    "lint": "eslint . --ignore-pattern dist --ignore-pattern .next --ignore-pattern docs",
     "dev:github": "vite --config vite.github.config.ts",
     "build:github": "vite build --config vite.github.config.ts",
     "preview:github": "vite preview --config vite.github.config.ts"

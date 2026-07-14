@@ -116,7 +116,11 @@ Los Excel se procesan temporalmente en memoria y no quedan almacenados por la ap
 
 ## Publicar en GitHub Pages
 
-1. Cree un repositorio y copie el contenido del proyecto.
+La carpeta `docs` incluida en el ZIP ya contiene JavaScript compilado. **No publique la raíz del repositorio**, porque `src/main.tsx` es código fuente y GitHub Pages lo entregaría con un MIME incorrecto.
+
+### Opción directa, sin instalar ni compilar
+
+1. Cree un repositorio y copie todo el contenido del proyecto, incluida la carpeta `docs`.
 2. Ejecute:
 
 ```bash
@@ -129,8 +133,12 @@ git push -u origin main
 ```
 
 3. Abra **Settings → Pages** en GitHub.
-4. En **Build and deployment**, seleccione **GitHub Actions**.
-5. El flujo `.github/workflows/deploy-pages.yml` compilará y publicará el sistema.
+4. En **Build and deployment**, elija **Deploy from a branch**.
+5. Seleccione la rama `main`, carpeta `/docs` y pulse **Save**.
+
+También puede elegir **GitHub Actions**; el flujo `.github/workflows/deploy-pages.yml` recompilará y publicará la misma carpeta.
+
+Si aparece `Expected a JavaScript-or-Wasm module ... application/octet-stream`, GitHub Pages está apuntando a `/ (root)`. Cámbielo a `/docs` o seleccione **GitHub Actions**.
 
 ## Ejecutar localmente para desarrollo
 
@@ -165,5 +173,6 @@ components/editorial-app.tsx       interfaz y operaciones remotas
 lib/google-sheets.ts               cliente de sincronización
 google-apps-script/Code.gs         servicio para la hoja
 public/cloud-config.json           URL pública opcional de Apps Script
+docs/                              sitio JavaScript listo para GitHub Pages
 .github/workflows/deploy-pages.yml publicación automática
 ```
