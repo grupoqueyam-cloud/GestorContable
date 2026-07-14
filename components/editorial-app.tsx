@@ -1,6 +1,7 @@
 "use client";
 
 import {
+  useCallback,
   useEffect,
   useMemo,
   useRef,
@@ -18,6 +19,9 @@ import {
   CalendarClock,
   Check,
   ChevronDown,
+  Cloud,
+  CloudDownload,
+  CloudUpload,
   CircleDollarSign,
   ClipboardList,
   Columns3,
@@ -85,6 +89,13 @@ import {
   saveVault,
   unlockVault,
 } from "../lib/storage";
+import {
+  emptyGoogleSheetsConfig,
+  isValidWebAppUrl,
+  normalizeAppData,
+  syncGoogleSheets,
+  testGoogleSheetsConnection,
+} from "../lib/google-sheets";
 import type {
   AppData,
   AuditEntry,
@@ -92,6 +103,7 @@ import type {
   EditorialRecord,
   EncryptedEnvelope,
   Filters,
+  GoogleSheetsConfig,
   ViewKey,
 } from "../lib/types";
 
@@ -114,6 +126,7 @@ const NAV_ITEMS: { key: ViewKey; label: string; icon: typeof LayoutDashboard }[]
   { key: "investigators", label: "Investigadores", icon: UsersRound },
   { key: "contracts", label: "Contratos", icon: FileText },
   { key: "alerts", label: "Alertas y vencimientos", icon: Bell },
+  { key: "google", label: "Google Sheets", icon: Cloud },
   { key: "data", label: "Datos y respaldos", icon: Database },
 ];
 
@@ -665,6 +678,124 @@ function AlertsView({ records, onEdit }: { records: EditorialRecord[]; onEdit: (
   return <div className="view-stack"><section className="alert-hero"><div><span className="eyebrow">AGENDA DE ACCIÓN</span><h3>{alerts.filter((item) => item.days < 0).length} vencimientos requieren atención</h3><p>Pagos e hitos contractuales calculados con las fechas disponibles.</p></div><CalendarClock /></section><section className="panel">{alerts.length ? <div className="alerts-list">{alerts.map((alert) => <button key={alert.id} onClick={() => onEdit(alert.record)}><div className={`alert-icon ${alert.tone}`}>{alert.tone === "danger" ? <AlertCircle /> : <CalendarClock />}</div><div><span className="eyebrow">{alert.kind}</span><h4>{alert.record.client}</h4><p>{alert.record.contractNumber || alert.record.topic || "Sin referencia"}</p></div><div className="alert-detail"><strong>{alert.detail}</strong><span>{formatDate(alert.date)}</span><small>{alert.days < 0 ? `${Math.abs(alert.days)} días vencido` : alert.days === 0 ? "Vence hoy" : `En ${alert.days} días`}</small></div></button>)}</div> : <EmptyState title="Sin alertas próximas" text="No existen pagos o fechas de fin dentro de los próximos 30 días." />}</section></div>;
 }
 
+type SyncUiState = {
+  state: "idle" | "syncing" | "success" | "error";
+  message: string;
+};
+
+function GoogleSheetsView({
+  data,
+  onSave,
+  onSync,
+  syncState,
+  notify,
+}: {
+  data: AppData;
+  onSave: (config: GoogleSheetsConfig) => Promise<void>;
+  onSync: () => Promise<void>;
+  syncState: SyncUiState;
+  notify: (message: string, tone?: "success" | "danger") => void;
+}) {
+  const [draft, setDraft] = useState<GoogleSheetsConfig>({
+    ...emptyGoogleSheetsConfig(),
+    ...data.googleSheets,
+  });
+  const [testing, setTesting] = useState(false);
+  const [testResult, setTestResult] = useState("");
+
+  const validate = () => {
+    if (!isValidWebAppUrl(draft.webAppUrl)) {
+      notify("Pega la URL de implementación de Apps Script terminada en /exec.", "danger");
+      return false;
+    }
+    if (!draft.syncToken.trim()) {
+      notify("Ingresa la misma clave SYNC_SECRET configurada en Apps Script.", "danger");
+      return false;
+    }
+    return true;
+  };
+
+  const save = async (showNotice = true) => {
+    if (!validate()) return false;
+    await onSave({
+      ...draft,
+      webAppUrl: draft.webAppUrl.trim(),
+      syncToken: draft.syncToken.trim(),
+      remoteRevision: data.googleSheets?.remoteRevision || draft.remoteRevision,
+      lastSyncAt: data.googleSheets?.lastSyncAt || draft.lastSyncAt,
+    });
+    if (showNotice) notify("Configuración de Google Sheets guardada en la bóveda cifrada.");
+    return true;
+  };
+
+  const test = async () => {
+    if (!validate()) return;
+    setTesting(true);
+    setTestResult("");
+    try {
+      const result = await testGoogleSheetsConnection(draft);
+      setTestResult(`${result.records} procesos · ${result.payments} pagos · revisión ${result.revision}`);
+      notify("Conexión con Google Sheets verificada.");
+    } catch (error) {
+      notify(error instanceof Error ? error.message : "No se pudo conectar con Google Sheets.", "danger");
+    } finally {
+      setTesting(false);
+    }
+  };
+
+  const sync = async () => {
+    if (!(await save(false))) return;
+    await onSync();
+  };
+
+  return (
+    <div className="view-stack">
+      <section className="sheets-hero">
+        <div className="sheets-hero-icon"><FileSpreadsheet /></div>
+        <div><span className="eyebrow">BASE CENTRAL COLABORATIVA</span><h3>Google Sheets conectado a GitHub Pages</h3><p>La aplicación conserva su bóveda cifrada local y concilia una copia central en la hoja de cálculo.</p></div>
+        <div className={`sync-indicator ${syncState.state}`}><i />{syncState.state === "syncing" ? "Sincronizando" : data.googleSheets?.lastSyncAt ? "Configurado" : "Sin configurar"}</div>
+      </section>
+
+      {syncState.message && <div className={`sync-banner ${syncState.state}`}>{syncState.state === "syncing" && <RefreshCw className="spin" />}{syncState.message}</div>}
+
+      <div className="sheets-layout">
+        <section className="panel sheets-config">
+          <div className="panel-heading"><div><span className="eyebrow">CONEXIÓN</span><h3>Implementación de Apps Script</h3></div><Cloud /></div>
+          <div className="sheets-form">
+            <label className="span-2">URL de aplicación web<input type="url" placeholder="https://script.google.com/macros/s/.../exec" value={draft.webAppUrl} onChange={(event) => setDraft({ ...draft, webAppUrl: event.target.value })} /></label>
+            <label className="span-2">Clave de sincronización<input type="password" autoComplete="off" placeholder="Misma clave configurada como SYNC_SECRET" value={draft.syncToken} onChange={(event) => setDraft({ ...draft, syncToken: event.target.value })} /></label>
+            <label className="toggle-row"><input type="checkbox" checked={draft.autoSync} onChange={(event) => setDraft({ ...draft, autoSync: event.target.checked })} /><span><strong>Sincronización automática</strong><small>Concilia cambios al abrir la sesión y cada minuto.</small></span></label>
+            <label className="toggle-row sensitive"><input type="checkbox" checked={draft.includeCredentials} onChange={(event) => setDraft({ ...draft, includeCredentials: event.target.checked })} /><span><strong>Incluir usuarios y contraseñas</strong><small>Solo actívelo si la hoja es privada y de acceso restringido.</small></span></label>
+          </div>
+          <div className="sheets-buttons">
+            <button className="button secondary" onClick={test} disabled={testing || syncState.state === "syncing"}>{testing ? <RefreshCw className="spin" size={16} /> : <Link2 size={16} />} Probar conexión</button>
+            <button className="button secondary" onClick={() => save()} disabled={syncState.state === "syncing"}><Save size={16} /> Guardar</button>
+            <button className="button primary" onClick={sync} disabled={syncState.state === "syncing"}><RefreshCw className={syncState.state === "syncing" ? "spin" : ""} size={16} /> Sincronizar ahora</button>
+          </div>
+          {testResult && <p className="connection-result"><Check size={15} />{testResult}</p>}
+        </section>
+
+        <section className="panel sheets-status">
+          <div className="panel-heading"><div><span className="eyebrow">ESTADO</span><h3>Copia central</h3></div><ShieldCheck /></div>
+          <div className="sync-stats">
+            <div><CloudUpload /><span>Procesos locales</span><strong>{data.records.length}</strong></div>
+            <div><CloudDownload /><span>Revisión remota</span><strong>{data.googleSheets?.remoteRevision || 0}</strong></div>
+            <div><CalendarClock /><span>Última sincronización</span><strong>{data.googleSheets?.lastSyncAt ? new Date(data.googleSheets.lastSyncAt).toLocaleString("es-EC", { dateStyle: "short", timeStyle: "short" }) : "Pendiente"}</strong></div>
+          </div>
+          <div className="sync-explainer">
+            <h4>¿Qué se almacena?</h4>
+            <p>Procesos, clientes, contratos, fechas, cartera, pagos, investigadores, revistas, avance, observaciones e historial. Los pagos se guardan además en una hoja separada para facilitar filtros y reportes.</p>
+            <h4>Conciliación segura</h4>
+            <p>Antes de subir, el sistema descarga la revisión vigente, combina cambios por ID y fecha de actualización, conserva eliminaciones y evita sobrescribir una edición simultánea.</p>
+          </div>
+        </section>
+      </div>
+
+      <section className="credentials-warning"><AlertCircle /><div><strong>La hoja debe permanecer privada</strong><p>GitHub Pages nunca contiene la clave. La URL y el token se guardan dentro de la bóveda cifrada de este navegador. Si activa credenciales, Google Sheets las almacenará como celdas legibles para quienes tengan acceso a la hoja.</p></div></section>
+    </div>
+  );
+}
+
 function DataView({
   data,
   passphrase,
@@ -735,7 +866,7 @@ function DataView({
         <article><div className="data-icon coral"><ArchiveRestore /></div><h3>Restaurar / combinar</h3><p>Incorpora un respaldo previo sin eliminar registros existentes. Los duplicados se concilian.</p><input ref={backupRef} type="file" accept=".json" hidden onChange={(event) => restoreBackup(event.target.files)} /><button className="button secondary" onClick={() => backupRef.current?.click()}><Upload size={16} /> Abrir respaldo</button></article>
       </section>
       <section className="data-grid">
-        <article className="panel"><div className="panel-heading"><div><span className="eyebrow">SEGURIDAD</span><h3>Cambiar contraseña local</h3></div><ShieldCheck /></div><div className="password-change"><label>Nueva contraseña<input type="password" value={newPass} onChange={(event) => setNewPass(event.target.value)} /></label><label>Confirmar<input type="password" value={confirmPass} onChange={(event) => setConfirmPass(event.target.value)} /></label><button className="button primary" onClick={changePassword}>Actualizar contraseña</button></div><div className="privacy-note"><ShieldCheck /><div><strong>Privacidad en GitHub Pages</strong><p>La aplicación no envía datos a servidores. Los registros se cifran y guardan en el navegador. Cada equipo necesita importar o restaurar su propia copia.</p></div></div></article>
+        <article className="panel"><div className="panel-heading"><div><span className="eyebrow">SEGURIDAD</span><h3>Cambiar contraseña local</h3></div><ShieldCheck /></div><div className="password-change"><label>Nueva contraseña<input type="password" value={newPass} onChange={(event) => setNewPass(event.target.value)} /></label><label>Confirmar<input type="password" value={confirmPass} onChange={(event) => setConfirmPass(event.target.value)} /></label><button className="button primary" onClick={changePassword}>Actualizar contraseña</button></div><div className="privacy-note"><ShieldCheck /><div><strong>Privacidad en GitHub Pages</strong><p>La copia local y la configuración de Google Sheets se cifran en este navegador. La sincronización remota solo se activa después de guardar una URL y una clave válidas.</p></div></div></article>
         <article className="panel"><div className="panel-heading"><div><span className="eyebrow">TRAZABILIDAD</span><h3>Actividad reciente</h3></div><span className="count-chip">{data.auditLog.length}</span></div><div className="audit-list">{data.auditLog.slice(0, 8).map((entry: AuditEntry) => <div key={entry.id}><i /><div><strong>{entry.action}</strong><p>{entry.detail}</p><small>{new Date(entry.timestamp).toLocaleString("es-EC")}</small></div></div>)}{data.auditLog.length === 0 && <p className="muted">Aún no existen eventos registrados.</p>}</div></article>
       </section>
     </div>
@@ -752,17 +883,71 @@ export default function EditorialApp() {
   const [mobileMenu, setMobileMenu] = useState(false);
   const [toast, setToast] = useState<{ message: string; tone: "success" | "danger" } | null>(null);
   const [savedAt, setSavedAt] = useState("");
+  const [syncState, setSyncState] = useState<SyncUiState>({ state: "idle", message: "" });
+  const dataRef = useRef<AppData | null>(null);
+  const syncingRef = useRef(false);
 
-  const notify = (message: string, tone: "success" | "danger" = "success") => {
+  const notify = useCallback((message: string, tone: "success" | "danger" = "success") => {
     setToast({ message, tone });
     window.setTimeout(() => setToast(null), 3800);
-  };
+  }, []);
   const persist = async (next: AppData) => {
-    setData(next);
-    await saveVault(next, passphrase);
+    const normalized = normalizeAppData(next);
+    dataRef.current = normalized;
+    setData(normalized);
+    await saveVault(normalized, passphrase);
     setSavedAt(new Date().toISOString());
   };
-  const ready = (next: AppData, key: string) => { setPassphrase(key); setData(next); setSavedAt(lastSavedAt()); };
+  const ready = (next: AppData, key: string) => {
+    const normalized = normalizeAppData(next);
+    setPassphrase(key);
+    dataRef.current = normalized;
+    setData(normalized);
+    setSavedAt(lastSavedAt());
+  };
+
+  const runGoogleSync = useCallback(async (manual = true) => {
+    if (syncingRef.current) {
+      if (manual) notify("Ya hay una sincronización en curso.", "danger");
+      return;
+    }
+    const current = dataRef.current;
+    if (!current?.googleSheets?.webAppUrl || !current.googleSheets.syncToken) return;
+    syncingRef.current = true;
+    setSyncState({ state: "syncing", message: "Descargando, conciliando y guardando cambios…" });
+    try {
+      const result = await syncGoogleSheets(current);
+      const next = manual
+        ? addAudit(result.data, "Google Sheets", `Sincronización completada: ${result.mergedCount} procesos · revisión ${result.remoteRevision}`)
+        : result.data;
+      dataRef.current = next;
+      setData(next);
+      await saveVault(next, passphrase);
+      setSavedAt(new Date().toISOString());
+      setSyncState({ state: "success", message: `${result.mergedCount} procesos conciliados con Google Sheets. Revisión ${result.remoteRevision}.` });
+      if (manual) notify("Google Sheets quedó sincronizado.");
+    } catch (error) {
+      const message = error instanceof Error ? error.message : "No se pudo sincronizar con Google Sheets.";
+      setSyncState({ state: "error", message });
+      if (manual) notify(message, "danger");
+    } finally {
+      syncingRef.current = false;
+    }
+  }, [notify, passphrase]);
+
+  const autoSync = data?.googleSheets?.autoSync;
+  const sheetsUrl = data?.googleSheets?.webAppUrl;
+  const sheetsToken = data?.googleSheets?.syncToken;
+
+  useEffect(() => {
+    if (!autoSync || !sheetsUrl || !sheetsToken) return;
+    const initial = window.setTimeout(() => { void runGoogleSync(false); }, 2500);
+    const interval = window.setInterval(() => { void runGoogleSync(false); }, 60000);
+    return () => {
+      window.clearTimeout(initial);
+      window.clearInterval(interval);
+    };
+  }, [autoSync, sheetsUrl, sheetsToken, runGoogleSync]);
 
   const filtered = useMemo(() => {
     if (!data) return [];
@@ -785,13 +970,21 @@ export default function EditorialApp() {
   const saveRecord = async (record: EditorialRecord) => {
     const exists = data.records.some((item) => item.id === record.id);
     const records = exists ? data.records.map((item) => item.id === record.id ? record : item) : [record, ...data.records];
-    await persist(addAudit({ ...data, records }, exists ? "Edición" : "Creación", `${record.client} · ${record.contractNumber || "sin contrato"}`));
+    await persist(addAudit({ ...data, records, deletedRecords: (data.deletedRecords || []).filter((item) => item.id !== record.id) }, exists ? "Edición" : "Creación", `${record.client} · ${record.contractNumber || "sin contrato"}`));
     setEditing(null); setNewRecord(false); notify("Registro guardado correctamente.");
   };
   const deleteRecord = async (record: EditorialRecord) => {
     if (!window.confirm(`¿Eliminar el proceso de ${record.client}? Esta acción se guardará en la base local.`)) return;
-    await persist(addAudit({ ...data, records: data.records.filter((item) => item.id !== record.id) }, "Eliminación", `${record.client} · ${record.contractNumber || "sin contrato"}`));
+    const deletedAt = new Date().toISOString();
+    await persist(addAudit({
+      ...data,
+      records: data.records.filter((item) => item.id !== record.id),
+      deletedRecords: [...(data.deletedRecords || []).filter((item) => item.id !== record.id), { id: record.id, deletedAt }],
+    }, "Eliminación", `${record.client} · ${record.contractNumber || "sin contrato"}`));
     setEditing(null); notify("Registro eliminado.");
+  };
+  const saveGoogleConfig = async (config: GoogleSheetsConfig) => {
+    await persist(addAudit({ ...data, googleSheets: config, version: 3 }, "Google Sheets", "Configuración de sincronización actualizada"));
   };
   const title = NAV_ITEMS.find((item) => item.key === view)?.label || "Control editorial";
 
@@ -816,6 +1009,7 @@ export default function EditorialApp() {
           {view === "investigators" && <InvestigatorsView records={data.records} />}
           {view === "contracts" && <ContractsView records={data.records} onEdit={setEditing} />}
           {view === "alerts" && <AlertsView records={data.records} onEdit={setEditing} />}
+          {view === "google" && <GoogleSheetsView data={data} onSave={saveGoogleConfig} onSync={() => runGoogleSync(true)} syncState={syncState} notify={notify} />}
           {view === "data" && <DataView data={data} passphrase={passphrase} onData={persist} onPassphrase={setPassphrase} notify={notify} />}
         </div>
       </main>

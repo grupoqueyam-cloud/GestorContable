@@ -362,9 +362,10 @@ export const importExcelFiles = async (
 };
 
 export const makeEmptyData = (): AppData => ({
-  version: 2,
+  version: 3,
   records: [],
   auditLog: [],
+  deletedRecords: [],
   importedAt: new Date().toISOString(),
 });
 

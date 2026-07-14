@@ -53,11 +53,27 @@ export interface AuditEntry {
   detail: string;
 }
 
+export interface DeletedRecord {
+  id: string;
+  deletedAt: string;
+}
+
+export interface GoogleSheetsConfig {
+  webAppUrl: string;
+  syncToken: string;
+  autoSync: boolean;
+  includeCredentials: boolean;
+  remoteRevision: number;
+  lastSyncAt: string;
+}
+
 export interface AppData {
-  version: 2;
+  version: 2 | 3;
   records: EditorialRecord[];
   auditLog: AuditEntry[];
   importedAt: string;
+  deletedRecords?: DeletedRecord[];
+  googleSheets?: GoogleSheetsConfig;
 }
 
 export interface EncryptedEnvelope {
@@ -79,6 +95,7 @@ export type ViewKey =
   | "investigators"
   | "contracts"
   | "alerts"
+  | "google"
   | "data";
 
 export interface Filters {
