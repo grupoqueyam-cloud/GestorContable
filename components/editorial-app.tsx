@@ -11,7 +11,6 @@ import {
 } from "react";
 import {
   AlertCircle,
-  ArchiveRestore,
   BarChart3,
   Bell,
   BookOpen,
@@ -63,12 +62,9 @@ import {
   XAxis,
   YAxis,
 } from "recharts";
-import { decryptData, downloadJson, encryptData } from "../lib/crypto";
 import {
   exportWorkbook,
   importExcelFiles,
-  makeEmptyData,
-  mergeRecordSets,
 } from "../lib/excel";
 import {
   blankPayment,
@@ -83,16 +79,10 @@ import {
   uid,
 } from "../lib/format";
 import {
-  clearVault,
-  hasVault,
-  lastSavedAt,
-  saveVault,
-  unlockVault,
-} from "../lib/storage";
-import {
   emptyGoogleSheetsConfig,
   isValidWebAppUrl,
   normalizeAppData,
+  pullGoogleSheets,
   syncGoogleSheets,
   testGoogleSheetsConnection,
 } from "../lib/google-sheets";
@@ -101,7 +91,6 @@ import type {
   AuditEntry,
   ClientPayment,
   EditorialRecord,
-  EncryptedEnvelope,
   Filters,
   GoogleSheetsConfig,
   ViewKey,
@@ -127,7 +116,7 @@ const NAV_ITEMS: { key: ViewKey; label: string; icon: typeof LayoutDashboard }[]
   { key: "contracts", label: "Contratos", icon: FileText },
   { key: "alerts", label: "Alertas y vencimientos", icon: Bell },
   { key: "google", label: "Google Sheets", icon: Cloud },
-  { key: "data", label: "Datos y respaldos", icon: Database },
+  { key: "data", label: "Importar y exportar", icon: Database },
 ];
 
 type ColumnKey =
@@ -209,137 +198,90 @@ const addAudit = (data: AppData, action: string, detail: string): AppData => ({
   ].slice(0, 300),
 });
 
-const downloadEnvelope = async (data: AppData, passphrase: string) => {
-  const encrypted = await encryptData(data, passphrase);
-  downloadJson(encrypted, `respaldo-editorial-${new Date().toISOString().slice(0, 10)}.enc.json`);
-};
-
-function AuthScreen({ onReady }: { onReady: (data: AppData, passphrase: string) => void }) {
-  const [mode, setMode] = useState<"loading" | "unlock" | "setup">("loading");
-  const [passphrase, setPassphrase] = useState("");
-  const [confirmPass, setConfirmPass] = useState("");
-  const [seedPassphrase, setSeedPassphrase] = useState("");
-  const [loadSeed, setLoadSeed] = useState(true);
-  const [seedAvailable, setSeedAvailable] = useState(false);
+function CloudAuthScreen({ onReady }: { onReady: (data: AppData) => void }) {
+  const [webAppUrl, setWebAppUrl] = useState("");
+  const [syncToken, setSyncToken] = useState("");
+  const [includeCredentials, setIncludeCredentials] = useState(false);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
 
   useEffect(() => {
     let active = true;
-    Promise.resolve().then(() => {
-      if (active) setMode(hasVault() ? "unlock" : "setup");
-    });
-    fetch("./base-inicial.enc.json", { cache: "no-store" })
-      .then((response) => { if (active) setSeedAvailable(response.ok); })
-      .catch(() => { if (active) setSeedAvailable(false); });
+    fetch("./cloud-config.json", { cache: "no-store" })
+      .then((response) => response.ok ? response.json() : {})
+      .then((config: { webAppUrl?: string }) => {
+        if (active && config.webAppUrl) setWebAppUrl(config.webAppUrl);
+      })
+      .catch(() => undefined);
     return () => { active = false; };
   }, []);
 
   const submit = async (event: FormEvent) => {
     event.preventDefault();
     setError("");
-    if (passphrase.length < 8) {
-      setError("La contraseña debe tener al menos 8 caracteres.");
+    if (!isValidWebAppUrl(webAppUrl)) {
+      setError("La URL debe ser la implementación de Apps Script terminada en /exec.");
+      return;
+    }
+    if (!syncToken.trim()) {
+      setError("Ingresa la clave SYNC_SECRET de Apps Script.");
       return;
     }
     setBusy(true);
     try {
-      if (mode === "unlock") {
-        const data = await unlockVault(passphrase);
-        onReady(data, passphrase);
-        return;
-      }
-      if (passphrase !== confirmPass) throw new Error("Las contraseñas no coinciden.");
-      let data = makeEmptyData();
-      if (loadSeed && seedAvailable) {
-        if (!seedPassphrase) throw new Error("Ingresa la clave de la base inicial.");
-        const response = await fetch("./base-inicial.enc.json", { cache: "no-store" });
-        const envelope = (await response.json()) as EncryptedEnvelope;
-        data = await decryptData(envelope, seedPassphrase);
-        data = addAudit(data, "Configuración", "Base inicial cifrada cargada en este equipo");
-      } else {
-        data = addAudit(data, "Configuración", "Base local creada sin registros iniciales");
-      }
-      await saveVault(data, passphrase);
-      onReady(data, passphrase);
+      const config: GoogleSheetsConfig = {
+        ...emptyGoogleSheetsConfig(),
+        webAppUrl: webAppUrl.trim(),
+        syncToken: syncToken.trim(),
+        autoSync: true,
+        includeCredentials,
+      };
+      const snapshot = await pullGoogleSheets(config);
+      onReady(normalizeAppData({
+        version: 3,
+        records: snapshot.records,
+        auditLog: snapshot.auditLog,
+        deletedRecords: snapshot.deletedRecords,
+        importedAt: snapshot.serverTime,
+        googleSheets: {
+          ...config,
+          remoteRevision: snapshot.revision,
+          lastSyncAt: snapshot.serverTime,
+        },
+      }));
     } catch (reason) {
-      setError(
-        reason instanceof Error && reason.message.includes("decrypt")
-          ? "No se pudo descifrar la base. Revisa la contraseña."
-          : reason instanceof Error
-            ? reason.message
-            : "No se pudo abrir la base.",
-      );
+      setError(reason instanceof Error ? reason.message : "No se pudo abrir la base de Google Sheets.");
     } finally {
       setBusy(false);
     }
   };
 
-  if (mode === "loading") return <div className="splash"><RefreshCw className="spin" /> Preparando sistema…</div>;
-
   return (
     <main className="auth-shell">
       <section className="auth-story">
-        <div className="brand-mark large"><BookOpen size={26} /></div>
+        <div className="brand-mark large"><Cloud size={27} /></div>
         <span className="eyebrow">SUSTAINABILITY · CONTROL EDITORIAL</span>
-        <h1>La operación editorial, financiera y humana en un solo lugar.</h1>
-        <p>
-          Clientes, contratos, cartera, revistas e investigadores con trazabilidad y
-          alertas. La información se cifra antes de guardarse en este dispositivo.
-        </p>
+        <h1>Toda la operación centralizada en Google Sheets.</h1>
+        <p>GitHub Pages sirve únicamente la interfaz. Clientes, contratos, cartera, pagos, investigadores e historial se consultan y guardan directamente en la hoja.</p>
         <div className="auth-points">
-          <span><ShieldCheck /> Cifrado AES-256</span>
+          <span><Cloud /> Base 100 % remota</span>
           <span><FileSpreadsheet /> Importación de Excel</span>
           <span><BarChart3 /> Indicadores en tiempo real</span>
         </div>
       </section>
       <section className="auth-panel">
         <div className="auth-card">
-          <span className="eyebrow">{mode === "unlock" ? "ACCESO SEGURO" : "PRIMERA CONFIGURACIÓN"}</span>
-          <h2>{mode === "unlock" ? "Desbloquear el sistema" : "Crear la bóveda local"}</h2>
-          <p>
-            {mode === "unlock"
-              ? "Ingresa la contraseña definida para este navegador."
-              : "Define una contraseña propia. No se envía ni se almacena fuera de este equipo."}
-          </p>
+          <span className="eyebrow">CONEXIÓN A LA BASE CENTRAL</span>
+          <h2>Abrir Google Sheets</h2>
+          <p>La clave se utiliza solo durante esta sesión y no se guarda en el navegador ni en GitHub.</p>
           <form onSubmit={submit} className="auth-form">
-            <label>
-              Contraseña del sistema
-              <span className="input-icon"><KeyRound size={17} /><input type="password" value={passphrase} onChange={(event) => setPassphrase(event.target.value)} autoFocus /></span>
-            </label>
-            {mode === "setup" && (
-              <>
-                <label>
-                  Confirmar contraseña
-                  <span className="input-icon"><LockKeyhole size={17} /><input type="password" value={confirmPass} onChange={(event) => setConfirmPass(event.target.value)} /></span>
-                </label>
-                {seedAvailable && (
-                  <div className="seed-box">
-                    <label className="check-row">
-                      <input type="checkbox" checked={loadSeed} onChange={(event) => setLoadSeed(event.target.checked)} />
-                      <span><strong>Cargar la base inicial conciliada</strong><small>Incluye los dos Excel suministrados.</small></span>
-                    </label>
-                    {loadSeed && (
-                      <label>
-                        Clave de la base inicial
-                        <input type="password" value={seedPassphrase} onChange={(event) => setSeedPassphrase(event.target.value)} />
-                      </label>
-                    )}
-                  </div>
-                )}
-              </>
-            )}
+            <label>URL de Apps Script<span className="input-icon"><Link2 size={17} /><input type="url" placeholder="https://script.google.com/macros/s/.../exec" value={webAppUrl} onChange={(event) => setWebAppUrl(event.target.value)} autoFocus /></span></label>
+            <label>Clave de sincronización<span className="input-icon"><KeyRound size={17} /><input type="password" autoComplete="off" placeholder="SYNC_SECRET" value={syncToken} onChange={(event) => setSyncToken(event.target.value)} /></span></label>
+            <label className="check-row cloud-check"><input type="checkbox" checked={includeCredentials} onChange={(event) => setIncludeCredentials(event.target.checked)} /><span><strong>Cargar usuarios y contraseñas de revistas</strong><small>Actívelo únicamente si la hoja es privada.</small></span></label>
             {error && <div className="form-error"><AlertCircle size={16} />{error}</div>}
-            <button className="button primary wide" disabled={busy}>
-              {busy ? <RefreshCw className="spin" size={17} /> : <ShieldCheck size={17} />}
-              {mode === "unlock" ? "Desbloquear" : "Configurar y continuar"}
-            </button>
+            <button className="button primary wide" disabled={busy}>{busy ? <RefreshCw className="spin" size={17} /> : <CloudDownload size={17} />}{busy ? "Conectando…" : "Conectar y abrir sistema"}</button>
           </form>
-          {mode === "unlock" && (
-            <button className="text-button" onClick={() => { if (window.confirm("¿Crear una base nueva? Se eliminará la copia local actual.")) { clearVault(); setMode("setup"); } }}>
-              Crear una base nueva en este navegador
-            </button>
-          )}
+          <div className="cloud-only-note"><ShieldCheck size={17} /><span><strong>Sin almacenamiento local</strong><small>Al cerrar o recargar la página, la sesión y la clave desaparecen.</small></span></div>
         </div>
       </section>
     </main>
@@ -474,7 +416,7 @@ function RecordModal({
           )}
           {tab === "access" && (
             <div className="form-grid">
-              <div className="privacy-note span-2"><ShieldCheck /><div><strong>Datos sensibles protegidos</strong><p>Estos campos permanecen cifrados dentro de la bóveda local y aparecen ocultos de forma predeterminada.</p></div></div>
+              <div className="privacy-note span-2"><ShieldCheck /><div><strong>Datos sensibles en Google Sheets</strong><p>Estos campos se guardan en la hoja central y aparecen ocultos en la interfaz. Restrinja el acceso a la hoja.</p></div></div>
               <label>Usuario<input value={draft.username} onChange={(event) => set("username", event.target.value)} autoComplete="off" /></label>
               <label>Contraseña<div className="password-field"><input type={showSecret ? "text" : "password"} value={draft.password} onChange={(event) => set("password", event.target.value)} autoComplete="new-password" /><button type="button" onClick={() => setShowSecret((value) => !value)}>{showSecret ? <EyeOff size={17} /> : <Eye size={17} />}</button></div></label>
             </div>
@@ -717,15 +659,20 @@ function GoogleSheetsView({
 
   const save = async (showNotice = true) => {
     if (!validate()) return false;
-    await onSave({
-      ...draft,
-      webAppUrl: draft.webAppUrl.trim(),
-      syncToken: draft.syncToken.trim(),
-      remoteRevision: data.googleSheets?.remoteRevision || draft.remoteRevision,
-      lastSyncAt: data.googleSheets?.lastSyncAt || draft.lastSyncAt,
-    });
-    if (showNotice) notify("Configuración de Google Sheets guardada en la bóveda cifrada.");
-    return true;
+    try {
+      await onSave({
+        ...draft,
+        webAppUrl: draft.webAppUrl.trim(),
+        syncToken: draft.syncToken.trim(),
+        remoteRevision: data.googleSheets?.remoteRevision || draft.remoteRevision,
+        lastSyncAt: data.googleSheets?.lastSyncAt || draft.lastSyncAt,
+      });
+      if (showNotice) notify("Configuración aplicada únicamente a esta sesión.");
+      return true;
+    } catch (error) {
+      notify(error instanceof Error ? error.message : "No se pudo aplicar la configuración.", "danger");
+      return false;
+    }
   };
 
   const test = async () => {
@@ -752,7 +699,7 @@ function GoogleSheetsView({
     <div className="view-stack">
       <section className="sheets-hero">
         <div className="sheets-hero-icon"><FileSpreadsheet /></div>
-        <div><span className="eyebrow">BASE CENTRAL COLABORATIVA</span><h3>Google Sheets conectado a GitHub Pages</h3><p>La aplicación conserva su bóveda cifrada local y concilia una copia central en la hoja de cálculo.</p></div>
+        <div><span className="eyebrow">BASE CENTRAL COLABORATIVA</span><h3>Google Sheets conectado a GitHub Pages</h3><p>Todos los datos se consultan y guardan en la hoja. El navegador no conserva una base local.</p></div>
         <div className={`sync-indicator ${syncState.state}`}><i />{syncState.state === "syncing" ? "Sincronizando" : data.googleSheets?.lastSyncAt ? "Configurado" : "Sin configurar"}</div>
       </section>
 
@@ -769,7 +716,7 @@ function GoogleSheetsView({
           </div>
           <div className="sheets-buttons">
             <button className="button secondary" onClick={test} disabled={testing || syncState.state === "syncing"}>{testing ? <RefreshCw className="spin" size={16} /> : <Link2 size={16} />} Probar conexión</button>
-            <button className="button secondary" onClick={() => save()} disabled={syncState.state === "syncing"}><Save size={16} /> Guardar</button>
+            <button className="button secondary" onClick={() => save()} disabled={syncState.state === "syncing"}><Save size={16} /> Aplicar en sesión</button>
             <button className="button primary" onClick={sync} disabled={syncState.state === "syncing"}><RefreshCw className={syncState.state === "syncing" ? "spin" : ""} size={16} /> Sincronizar ahora</button>
           </div>
           {testResult && <p className="connection-result"><Check size={15} />{testResult}</p>}
@@ -778,7 +725,7 @@ function GoogleSheetsView({
         <section className="panel sheets-status">
           <div className="panel-heading"><div><span className="eyebrow">ESTADO</span><h3>Copia central</h3></div><ShieldCheck /></div>
           <div className="sync-stats">
-            <div><CloudUpload /><span>Procesos locales</span><strong>{data.records.length}</strong></div>
+            <div><CloudUpload /><span>Procesos en la nube</span><strong>{data.records.length}</strong></div>
             <div><CloudDownload /><span>Revisión remota</span><strong>{data.googleSheets?.remoteRevision || 0}</strong></div>
             <div><CalendarClock /><span>Última sincronización</span><strong>{data.googleSheets?.lastSyncAt ? new Date(data.googleSheets.lastSyncAt).toLocaleString("es-EC", { dateStyle: "short", timeStyle: "short" }) : "Pendiente"}</strong></div>
           </div>
@@ -791,29 +738,22 @@ function GoogleSheetsView({
         </section>
       </div>
 
-      <section className="credentials-warning"><AlertCircle /><div><strong>La hoja debe permanecer privada</strong><p>GitHub Pages nunca contiene la clave. La URL y el token se guardan dentro de la bóveda cifrada de este navegador. Si activa credenciales, Google Sheets las almacenará como celdas legibles para quienes tengan acceso a la hoja.</p></div></section>
+      <section className="credentials-warning"><AlertCircle /><div><strong>La hoja debe permanecer privada</strong><p>GitHub Pages nunca contiene la clave y el navegador no la guarda. Si activa credenciales, Google Sheets las almacenará como celdas legibles para quienes tengan acceso a la hoja.</p></div></section>
     </div>
   );
 }
 
 function DataView({
   data,
-  passphrase,
   onData,
-  onPassphrase,
   notify,
 }: {
   data: AppData;
-  passphrase: string;
   onData: (data: AppData) => Promise<void>;
-  onPassphrase: (value: string) => void;
   notify: (message: string, tone?: "success" | "danger") => void;
 }) {
   const excelRef = useRef<HTMLInputElement>(null);
-  const backupRef = useRef<HTMLInputElement>(null);
   const [busy, setBusy] = useState("");
-  const [newPass, setNewPass] = useState("");
-  const [confirmPass, setConfirmPass] = useState("");
   const importFiles = async (files: FileList | null) => {
     if (!files?.length) return;
     setBusy("Importando y conciliando archivos…");
@@ -829,44 +769,15 @@ function DataView({
       if (excelRef.current) excelRef.current.value = "";
     }
   };
-  const restoreBackup = async (files: FileList | null) => {
-    const file = files?.[0];
-    if (!file) return;
-    const key = window.prompt("Contraseña con la que se creó este respaldo:");
-    if (!key) return;
-    setBusy("Descifrando respaldo…");
-    try {
-      const restored = await decryptData(JSON.parse(await file.text()) as EncryptedEnvelope, key);
-      const merged = mergeRecordSets(data.records, restored.records);
-      await onData(addAudit({ ...data, records: merged }, "Restauración", `${file.name}: ${restored.records.length} registros procesados`));
-      notify(`Respaldo restaurado. Base actual: ${merged.length} procesos.`);
-    } catch {
-      notify("No se pudo abrir el respaldo. Revisa el archivo y su contraseña.", "danger");
-    } finally {
-      setBusy("");
-      if (backupRef.current) backupRef.current.value = "";
-    }
-  };
-  const changePassword = async () => {
-    if (newPass.length < 8) return notify("La nueva contraseña debe tener al menos 8 caracteres.", "danger");
-    if (newPass !== confirmPass) return notify("Las contraseñas no coinciden.", "danger");
-    setBusy("Actualizando cifrado…");
-    await saveVault(data, newPass);
-    onPassphrase(newPass);
-    setNewPass(""); setConfirmPass(""); setBusy("");
-    notify("Contraseña actualizada correctamente.");
-  };
   return (
     <div className="view-stack">
       {busy && <div className="busy-banner"><RefreshCw className="spin" />{busy}</div>}
-      <section className="data-actions">
-        <article><div className="data-icon green"><Upload /></div><h3>Importar Excel</h3><p>Reconoce automáticamente las dos matrices suministradas, nuevas versiones y hojas por investigador.</p><input ref={excelRef} type="file" accept=".xlsx,.xls" multiple hidden onChange={(event) => importFiles(event.target.files)} /><button className="button primary" onClick={() => excelRef.current?.click()}><FileSpreadsheet size={16} /> Seleccionar archivos</button></article>
-        <article><div className="data-icon blue"><Download /></div><h3>Exportar reporte</h3><p>Genera un Excel actualizado con procesos y detalle de pagos para análisis o archivo.</p><button className="button secondary" onClick={async () => { setBusy("Generando Excel…"); try { await exportWorkbook(data.records); notify("Reporte Excel generado."); } finally { setBusy(""); } }}><Download size={16} /> Descargar Excel</button></article>
-        <article><div className="data-icon amber"><ShieldCheck /></div><h3>Respaldo cifrado</h3><p>Guarda una copia portable y protegida de todos los datos, accesos e historial.</p><button className="button secondary" onClick={() => downloadEnvelope(data, passphrase)}><ArchiveRestore size={16} /> Crear respaldo</button></article>
-        <article><div className="data-icon coral"><ArchiveRestore /></div><h3>Restaurar / combinar</h3><p>Incorpora un respaldo previo sin eliminar registros existentes. Los duplicados se concilian.</p><input ref={backupRef} type="file" accept=".json" hidden onChange={(event) => restoreBackup(event.target.files)} /><button className="button secondary" onClick={() => backupRef.current?.click()}><Upload size={16} /> Abrir respaldo</button></article>
+      <section className="data-actions cloud-data-actions">
+        <article><div className="data-icon green"><Upload /></div><h3>Importar Excel a Google Sheets</h3><p>Los archivos se procesan en memoria y sus registros se guardan inmediatamente en la base central.</p><input ref={excelRef} type="file" accept=".xlsx,.xls" multiple hidden onChange={(event) => importFiles(event.target.files)} /><button className="button primary" onClick={() => excelRef.current?.click()}><FileSpreadsheet size={16} /> Seleccionar archivos</button></article>
+        <article><div className="data-icon blue"><Download /></div><h3>Exportar reporte</h3><p>Genera un Excel desde los datos vigentes descargados de Google Sheets.</p><button className="button secondary" onClick={async () => { setBusy("Generando Excel…"); try { await exportWorkbook(data.records); notify("Reporte Excel generado."); } finally { setBusy(""); } }}><Download size={16} /> Descargar Excel</button></article>
       </section>
       <section className="data-grid">
-        <article className="panel"><div className="panel-heading"><div><span className="eyebrow">SEGURIDAD</span><h3>Cambiar contraseña local</h3></div><ShieldCheck /></div><div className="password-change"><label>Nueva contraseña<input type="password" value={newPass} onChange={(event) => setNewPass(event.target.value)} /></label><label>Confirmar<input type="password" value={confirmPass} onChange={(event) => setConfirmPass(event.target.value)} /></label><button className="button primary" onClick={changePassword}>Actualizar contraseña</button></div><div className="privacy-note"><ShieldCheck /><div><strong>Privacidad en GitHub Pages</strong><p>La copia local y la configuración de Google Sheets se cifran en este navegador. La sincronización remota solo se activa después de guardar una URL y una clave válidas.</p></div></div></article>
+        <article className="panel"><div className="panel-heading"><div><span className="eyebrow">ALMACENAMIENTO</span><h3>Modo exclusivamente remoto</h3></div><Cloud /></div><div className="remote-storage-card"><strong>{data.records.length} procesos en Google Sheets</strong><p>No se usa almacenamiento persistente del navegador ni una base incluida en GitHub. Cada creación, edición, eliminación o importación debe confirmarse en la hoja antes de actualizar la pantalla.</p><span><ShieldCheck size={15} /> La clave desaparece al cerrar o recargar la pestaña.</span></div></article>
         <article className="panel"><div className="panel-heading"><div><span className="eyebrow">TRAZABILIDAD</span><h3>Actividad reciente</h3></div><span className="count-chip">{data.auditLog.length}</span></div><div className="audit-list">{data.auditLog.slice(0, 8).map((entry: AuditEntry) => <div key={entry.id}><i /><div><strong>{entry.action}</strong><p>{entry.detail}</p><small>{new Date(entry.timestamp).toLocaleString("es-EC")}</small></div></div>)}{data.auditLog.length === 0 && <p className="muted">Aún no existen eventos registrados.</p>}</div></article>
       </section>
     </div>
@@ -875,7 +786,6 @@ function DataView({
 
 export default function EditorialApp() {
   const [data, setData] = useState<AppData | null>(null);
-  const [passphrase, setPassphrase] = useState("");
   const [view, setView] = useState<ViewKey>("dashboard");
   const [filters, setFilters] = useState<Filters>(EMPTY_FILTERS);
   const [editing, setEditing] = useState<EditorialRecord | null>(null);
@@ -892,18 +802,32 @@ export default function EditorialApp() {
     window.setTimeout(() => setToast(null), 3800);
   }, []);
   const persist = async (next: AppData) => {
+    if (syncingRef.current) throw new Error("Espera a que termine la sincronización en curso.");
     const normalized = normalizeAppData(next);
-    dataRef.current = normalized;
-    setData(normalized);
-    await saveVault(normalized, passphrase);
-    setSavedAt(new Date().toISOString());
+    if (!normalized.googleSheets?.webAppUrl || !normalized.googleSheets.syncToken) {
+      throw new Error("La sesión de Google Sheets no está configurada.");
+    }
+    syncingRef.current = true;
+    setSyncState({ state: "syncing", message: "Guardando el cambio directamente en Google Sheets…" });
+    try {
+      const result = await syncGoogleSheets(normalized);
+      dataRef.current = result.data;
+      setData(result.data);
+      setSavedAt(result.data.googleSheets?.lastSyncAt || new Date().toISOString());
+      setSyncState({ state: "success", message: `Cambio confirmado en Google Sheets. Revisión ${result.remoteRevision}.` });
+    } catch (error) {
+      const message = error instanceof Error ? error.message : "No se pudo guardar en Google Sheets.";
+      setSyncState({ state: "error", message });
+      throw new Error(message);
+    } finally {
+      syncingRef.current = false;
+    }
   };
-  const ready = (next: AppData, key: string) => {
+  const ready = (next: AppData) => {
     const normalized = normalizeAppData(next);
-    setPassphrase(key);
     dataRef.current = normalized;
     setData(normalized);
-    setSavedAt(lastSavedAt());
+    setSavedAt(normalized.googleSheets?.lastSyncAt || "");
   };
 
   const runGoogleSync = useCallback(async (manual = true) => {
@@ -916,14 +840,12 @@ export default function EditorialApp() {
     syncingRef.current = true;
     setSyncState({ state: "syncing", message: "Descargando, conciliando y guardando cambios…" });
     try {
-      const result = await syncGoogleSheets(current);
-      const next = manual
-        ? addAudit(result.data, "Google Sheets", `Sincronización completada: ${result.mergedCount} procesos · revisión ${result.remoteRevision}`)
-        : result.data;
+      const source = manual ? addAudit(current, "Google Sheets", "Sincronización manual solicitada") : current;
+      const result = await syncGoogleSheets(source);
+      const next = result.data;
       dataRef.current = next;
       setData(next);
-      await saveVault(next, passphrase);
-      setSavedAt(new Date().toISOString());
+      setSavedAt(next.googleSheets?.lastSyncAt || new Date().toISOString());
       setSyncState({ state: "success", message: `${result.mergedCount} procesos conciliados con Google Sheets. Revisión ${result.remoteRevision}.` });
       if (manual) notify("Google Sheets quedó sincronizado.");
     } catch (error) {
@@ -933,7 +855,7 @@ export default function EditorialApp() {
     } finally {
       syncingRef.current = false;
     }
-  }, [notify, passphrase]);
+  }, [notify]);
 
   const autoSync = data?.googleSheets?.autoSync;
   const sheetsUrl = data?.googleSheets?.webAppUrl;
@@ -965,23 +887,31 @@ export default function EditorialApp() {
     });
   }, [data, filters]);
 
-  if (!data) return <AuthScreen onReady={ready} />;
+  if (!data) return <CloudAuthScreen onReady={ready} />;
 
   const saveRecord = async (record: EditorialRecord) => {
     const exists = data.records.some((item) => item.id === record.id);
     const records = exists ? data.records.map((item) => item.id === record.id ? record : item) : [record, ...data.records];
-    await persist(addAudit({ ...data, records, deletedRecords: (data.deletedRecords || []).filter((item) => item.id !== record.id) }, exists ? "Edición" : "Creación", `${record.client} · ${record.contractNumber || "sin contrato"}`));
-    setEditing(null); setNewRecord(false); notify("Registro guardado correctamente.");
+    try {
+      await persist(addAudit({ ...data, records, deletedRecords: (data.deletedRecords || []).filter((item) => item.id !== record.id) }, exists ? "Edición" : "Creación", `${record.client} · ${record.contractNumber || "sin contrato"}`));
+      setEditing(null); setNewRecord(false); notify("Registro guardado en Google Sheets.");
+    } catch (error) {
+      notify(error instanceof Error ? error.message : "No se pudo guardar el registro.", "danger");
+    }
   };
   const deleteRecord = async (record: EditorialRecord) => {
-    if (!window.confirm(`¿Eliminar el proceso de ${record.client}? Esta acción se guardará en la base local.`)) return;
+    if (!window.confirm(`¿Eliminar el proceso de ${record.client}? Esta acción se guardará en Google Sheets.`)) return;
     const deletedAt = new Date().toISOString();
-    await persist(addAudit({
-      ...data,
-      records: data.records.filter((item) => item.id !== record.id),
-      deletedRecords: [...(data.deletedRecords || []).filter((item) => item.id !== record.id), { id: record.id, deletedAt }],
-    }, "Eliminación", `${record.client} · ${record.contractNumber || "sin contrato"}`));
-    setEditing(null); notify("Registro eliminado.");
+    try {
+      await persist(addAudit({
+        ...data,
+        records: data.records.filter((item) => item.id !== record.id),
+        deletedRecords: [...(data.deletedRecords || []).filter((item) => item.id !== record.id), { id: record.id, deletedAt }],
+      }, "Eliminación", `${record.client} · ${record.contractNumber || "sin contrato"}`));
+      setEditing(null); notify("Registro eliminado de Google Sheets.");
+    } catch (error) {
+      notify(error instanceof Error ? error.message : "No se pudo eliminar el registro.", "danger");
+    }
   };
   const saveGoogleConfig = async (config: GoogleSheetsConfig) => {
     await persist(addAudit({ ...data, googleSheets: config, version: 3 }, "Google Sheets", "Configuración de sincronización actualizada"));
@@ -993,7 +923,7 @@ export default function EditorialApp() {
       <aside className={`sidebar ${mobileMenu ? "open" : ""}`}>
         <div className="sidebar-brand"><div className="brand-mark"><BookOpen size={21} /></div><div><strong>Sustainability</strong><span>Control editorial</span></div><button className="sidebar-close" onClick={() => setMobileMenu(false)}><X /></button></div>
         <nav>{NAV_ITEMS.map((item) => { const Icon = item.icon; return <button key={item.key} className={view === item.key ? "active" : ""} onClick={() => { setView(item.key); setMobileMenu(false); }}><Icon size={18} /><span>{item.label}</span>{item.key === "alerts" && data.records.filter((record) => daysFromToday(record.nextPaymentDate || record.endDate) < 0 && record.progress < 100).length > 0 && <i className="nav-count">{data.records.filter((record) => daysFromToday(record.nextPaymentDate || record.endDate) < 0 && record.progress < 100).length}</i>}</button>; })}</nav>
-        <div className="sidebar-bottom"><div className="secure-status"><ShieldCheck /><div><strong>Bóveda protegida</strong><span>{savedAt ? `Guardado ${new Date(savedAt).toLocaleTimeString("es-EC", { hour: "2-digit", minute: "2-digit" })}` : "Guardado automático"}</span></div></div><button onClick={() => { setData(null); setPassphrase(""); }}><LockKeyhole size={17} /> Bloquear sesión</button></div>
+        <div className="sidebar-bottom"><div className="secure-status"><Cloud /><div><strong>Base en Google Sheets</strong><span>{savedAt ? `Sincronizado ${new Date(savedAt).toLocaleTimeString("es-EC", { hour: "2-digit", minute: "2-digit" })}` : "Conexión activa"}</span></div></div><button onClick={() => { dataRef.current = null; setData(null); setSyncState({ state: "idle", message: "" }); }}><LockKeyhole size={17} /> Cerrar sesión</button></div>
       </aside>
       {mobileMenu && <button className="mobile-overlay" onClick={() => setMobileMenu(false)} aria-label="Cerrar menú" />}
       <main className="main-area">
@@ -1010,7 +940,7 @@ export default function EditorialApp() {
           {view === "contracts" && <ContractsView records={data.records} onEdit={setEditing} />}
           {view === "alerts" && <AlertsView records={data.records} onEdit={setEditing} />}
           {view === "google" && <GoogleSheetsView data={data} onSave={saveGoogleConfig} onSync={() => runGoogleSync(true)} syncState={syncState} notify={notify} />}
-          {view === "data" && <DataView data={data} passphrase={passphrase} onData={persist} onPassphrase={setPassphrase} notify={notify} />}
+          {view === "data" && <DataView data={data} onData={persist} notify={notify} />}
         </div>
       </main>
       {(editing || newRecord) && <RecordModal source={editing || blankRecord()} onClose={() => { setEditing(null); setNewRecord(false); }} onSave={saveRecord} onDelete={editing ? deleteRecord : undefined} />}

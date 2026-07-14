@@ -76,18 +76,6 @@ export interface AppData {
   googleSheets?: GoogleSheetsConfig;
 }
 
-export interface EncryptedEnvelope {
-  version: 1;
-  algorithm: "AES-GCM";
-  kdf: "PBKDF2-SHA256";
-  iterations: number;
-  salt: string;
-  iv: string;
-  data: string;
-  recordCount?: number;
-  generatedAt?: string;
-}
-
 export type ViewKey =
   | "dashboard"
   | "processes"

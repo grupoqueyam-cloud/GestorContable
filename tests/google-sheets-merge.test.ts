@@ -36,7 +36,7 @@ test("combina por ID y conserva la version mas reciente", () => {
   assert.equal(merged.records.find((item) => item.id === "a")?.client, "Cliente local");
 });
 
-test("respeta eliminaciones y no borra credenciales locales omitidas", () => {
+test("respeta eliminaciones y no borra credenciales de acceso omitidas", () => {
   const localA = record("a", "Cliente", "2026-02-01T00:00:00.000Z");
   const localB = record("b", "Eliminar", "2026-02-01T00:00:00.000Z");
   const remoteA = { ...localA, client: "Cliente actualizado", username: "", password: "", updatedAt: "2026-03-01T00:00:00.000Z" };
