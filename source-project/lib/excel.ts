@@ -1,4 +1,4 @@
-import type { AppData, ClientPayment, EditorialRecord } from "./types";
+import type { AppData, ClientPayment, EditorialRecord, Investigator } from "./types";
 import {
   blankRecord,
   canonicalKey,
@@ -75,6 +75,7 @@ export const mergeRecordSets = (
       "product",
       "indexation",
       "status",
+      "operationalStatus",
       "username",
       "password",
       "journal",
@@ -82,14 +83,26 @@ export const mergeRecordSets = (
       "loginLink",
       "investigator",
       "previousInvestigator",
+      "investigatorStartDate",
+      "investigatorEndDate",
       "startDate",
       "endDate",
       "acceptanceDate",
       "nextPaymentDate",
       "contractNumber",
+      "contractStartDate",
+      "contractEndDate",
+      "contractLink",
       "productionOrder",
       "clientEmail",
       "clientId",
+      "clientPhone",
+      "clientAddress",
+      "clientInstitution",
+      "investigatorInvoiceNumber",
+      "investigatorInvoiceDate",
+      "investigatorInvoiceLink",
+      "investigatorInvoiceStatus",
     ];
     textFields.forEach((field) => {
       if (String(record[field] ?? "").trim()) {
@@ -98,6 +111,7 @@ export const mergeRecordSets = (
     });
     merged.progress = Math.max(previous.progress, record.progress);
     merged.apcValue = Math.max(previous.apcValue, record.apcValue);
+    merged.hasApc = previous.hasApc || record.hasApc || merged.apcValue > 0;
     merged.clientTotal = Math.max(previous.clientTotal, record.clientTotal);
     merged.outstandingBalance = Math.max(
       Number(previous.outstandingBalance) || 0,
@@ -109,6 +123,13 @@ export const mergeRecordSets = (
       record.investigatorPayment,
     );
     merged.investigatorPaid = Math.max(previous.investigatorPaid, record.investigatorPaid);
+    merged.investigatorInvoiceValue = Math.max(previous.investigatorInvoiceValue, record.investigatorInvoiceValue);
+    merged.journalAccesses = [...previous.journalAccesses, ...record.journalAccesses]
+      .filter((item, index, array) => array.findIndex((candidate) => candidate.id === item.id || (
+        candidate.journal === item.journal && candidate.journalLink === item.journalLink
+      )) === index);
+    merged.driveFiles = [...previous.driveFiles, ...record.driveFiles]
+      .filter((item, index, array) => array.findIndex((candidate) => candidate.id === item.id || candidate.url === item.url) === index);
     merged.clientPayments = uniquePayments([
       ...previous.clientPayments,
       ...record.clientPayments,
@@ -194,6 +215,8 @@ const parseProductionSheet = (
       record.topic = record.product;
       record.startDate = toDate(cellValue(startRow[column]));
       record.endDate = toDate(cellValue(endRow[column]));
+      record.contractStartDate = record.startDate;
+      record.contractEndDate = record.endDate;
       record.clientTotal = toNumber(cellValue(totalRow[column]));
       const sourceBalance = toNumber(cellValue(balanceRow[column]));
       record.status = text(statusRow[column]) || "Pendiente";
@@ -292,6 +315,8 @@ const parseControlSheet = (
     record.progress = statusProgress(record.status);
     record.startDate = toDate(get(row, "startDate"));
     record.endDate = toDate(get(row, "endDate"));
+    record.contractStartDate = record.startDate;
+    record.contractEndDate = record.endDate;
     record.acceptanceDate = toDate(get(row, "acceptanceDate"));
     record.journalLink = text(get(row, "journalLink"));
     record.loginLink = text(get(row, "loginLink"));
@@ -362,14 +387,15 @@ export const importExcelFiles = async (
 };
 
 export const makeEmptyData = (): AppData => ({
-  version: 3,
+  version: 4,
   records: [],
+  investigators: [],
   auditLog: [],
   deletedRecords: [],
   importedAt: new Date().toISOString(),
 });
 
-export const exportWorkbook = async (records: EditorialRecord[]) => {
+export const exportWorkbook = async (records: EditorialRecord[], investigators: Investigator[] = []) => {
   const ExcelJS = await import("exceljs");
   const workbook = new ExcelJS.Workbook();
   workbook.creator = "Control Editorial Sustainability";
@@ -382,6 +408,7 @@ export const exportWorkbook = async (records: EditorialRecord[]) => {
     "Producto",
     "Indexación",
     "Estado",
+    "Prioridad operativa",
     "Avance (%)",
     "Revista",
     "Usuario",
@@ -389,17 +416,35 @@ export const exportWorkbook = async (records: EditorialRecord[]) => {
     "Link revista",
     "Link login",
     "APC",
+    "Con APC",
     "Investigador",
-    "Inicio",
-    "Fin",
+    "Inicio proceso",
+    "Fin proceso",
+    "Inicio contrato",
+    "Fin contrato",
+    "Link contrato",
+    "Inicio investigador",
+    "Fin investigador",
     "Total cliente",
     "Saldo importado/manual",
     "Próximo pago",
     "Fecha próximo pago",
     "Pago investigador",
     "Pagado investigador",
+    "Factura investigador",
+    "Fecha factura investigador",
+    "Valor factura investigador",
+    "Link factura investigador",
+    "Estado factura investigador",
     "Contrato",
     "Orden de producción",
+    "Correo cliente",
+    "Documento cliente",
+    "Teléfono cliente",
+    "Dirección cliente",
+    "Institución cliente",
+    "Revistas y accesos JSON",
+    "Archivos Drive JSON",
     "Observaciones",
   ];
   processes.addRow(headers);
@@ -411,6 +456,7 @@ export const exportWorkbook = async (records: EditorialRecord[]) => {
       record.product,
       record.indexation,
       record.status,
+      record.operationalStatus,
       record.progress,
       record.journal,
       record.username,
@@ -418,26 +464,44 @@ export const exportWorkbook = async (records: EditorialRecord[]) => {
       record.journalLink,
       record.loginLink,
       record.apcValue,
+      record.hasApc ? "Sí" : "No",
       record.investigator,
       record.startDate,
       record.endDate,
+      record.contractStartDate,
+      record.contractEndDate,
+      record.contractLink,
+      record.investigatorStartDate,
+      record.investigatorEndDate,
       record.clientTotal,
       record.outstandingBalance,
       record.nextPaymentAmount,
       record.nextPaymentDate,
       record.investigatorPayment,
       record.investigatorPaid,
+      record.investigatorInvoiceNumber,
+      record.investigatorInvoiceDate,
+      record.investigatorInvoiceValue,
+      record.investigatorInvoiceLink,
+      record.investigatorInvoiceStatus,
       record.contractNumber,
       record.productionOrder,
+      record.clientEmail,
+      record.clientId,
+      record.clientPhone,
+      record.clientAddress,
+      record.clientInstitution,
+      JSON.stringify(record.journalAccesses),
+      JSON.stringify(record.driveFiles),
       record.observations,
     ]);
   });
   processes.getRow(1).font = { bold: true, color: { argb: "FFFFFFFF" } };
   processes.getRow(1).fill = { type: "pattern", pattern: "solid", fgColor: { argb: "FF173F3A" } };
   processes.views = [{ state: "frozen", ySplit: 1 }];
-  processes.autoFilter = { from: "A1", to: `Y${records.length + 1}` };
+  processes.autoFilter = `A1:${processes.getColumn(headers.length).letter}${Math.max(1, records.length + 1)}`;
   processes.columns.forEach((column, index) => {
-    column.width = [14, 26, 42, 18, 16, 24, 12, 24, 20, 18, 32, 32, 14, 24, 14, 14, 16, 18, 16, 18, 18, 20, 22, 22, 44][index] || 18;
+    column.width = [14, 26, 42, 18, 16, 24, 18, 12, 24, 20, 18, 32, 32, 14, 12, 24, 14, 14, 14, 14, 32, 14, 14, 16, 18, 16, 18, 18, 20, 20, 18, 18, 28, 18, 22, 22, 26, 22, 18, 24, 24, 24, 28, 48, 48, 44][index] || 18;
   });
 
   const payments = workbook.addWorksheet("Pagos cliente");
@@ -460,6 +524,40 @@ export const exportWorkbook = async (records: EditorialRecord[]) => {
   payments.getRow(1).fill = { type: "pattern", pattern: "solid", fgColor: { argb: "FF2D7268" } };
   payments.views = [{ state: "frozen", ySplit: 1 }];
   payments.columns = [26, 22, 22, 18, 18, 16, 16, 40].map((width) => ({ width }));
+
+  const team = workbook.addWorksheet("Investigadores");
+  team.addRow([
+    "Nombre", "Documento", "Correo", "Teléfono", "Especialidad", "Fecha de ingreso",
+    "Fecha de salida", "Carpeta de Drive", "Estado", "Procesos asignados", "Procesos activos",
+    "Honorarios", "Pagado", "Pendiente", "Notas",
+  ]);
+  investigators.forEach((investigator) => {
+    const assigned = records.filter((record) => record.investigator === investigator.name);
+    const fees = assigned.reduce((sum, record) => sum + record.investigatorPayment, 0);
+    const paid = assigned.reduce((sum, record) => sum + record.investigatorPaid, 0);
+    team.addRow([
+      investigator.name,
+      investigator.documentId,
+      investigator.email,
+      investigator.phone,
+      investigator.specialty,
+      investigator.startDate,
+      investigator.endDate,
+      investigator.driveFolderUrl,
+      investigator.active ? "Activo" : "Inactivo",
+      assigned.length,
+      assigned.filter((record) => record.progress < 100).length,
+      fees,
+      paid,
+      Math.max(0, fees - paid),
+      investigator.notes,
+    ]);
+  });
+  team.getRow(1).font = { bold: true, color: { argb: "FFFFFFFF" } };
+  team.getRow(1).fill = { type: "pattern", pattern: "solid", fgColor: { argb: "FF2D7268" } };
+  team.views = [{ state: "frozen", ySplit: 1 }];
+  team.autoFilter = `A1:O${Math.max(1, investigators.length + 1)}`;
+  team.columns = [26, 20, 28, 18, 24, 18, 18, 36, 14, 18, 16, 16, 16, 16, 42].map((width) => ({ width }));
 
   const buffer = await workbook.xlsx.writeBuffer();
   const blob = new Blob([buffer as BlobPart], {

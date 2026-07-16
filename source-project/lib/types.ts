@@ -1,4 +1,37 @@
 export type PaymentStatus = "pendiente" | "pagado" | "parcial" | "vencido";
+export type OperationalStatus = "Normal" | "Urgente" | "Estancado" | "Espera del cliente";
+
+export interface JournalAccess {
+  id: string;
+  journal: string;
+  journalLink: string;
+  loginLink: string;
+  username: string;
+  password: string;
+}
+
+export interface DriveFile {
+  id: string;
+  name: string;
+  category: string;
+  url: string;
+}
+
+export interface Investigator {
+  id: string;
+  name: string;
+  documentId: string;
+  email: string;
+  phone: string;
+  specialty: string;
+  startDate: string;
+  endDate: string;
+  driveFolderUrl: string;
+  notes: string;
+  active: boolean;
+  createdAt: string;
+  updatedAt: string;
+}
 
 export interface ClientPayment {
   id: string;
@@ -17,6 +50,7 @@ export interface EditorialRecord {
   product: string;
   indexation: string;
   status: string;
+  operationalStatus: OperationalStatus;
   progress: number;
   username: string;
   password: string;
@@ -24,8 +58,12 @@ export interface EditorialRecord {
   journalLink: string;
   loginLink: string;
   apcValue: number;
+  hasApc: boolean;
+  journalAccesses: JournalAccess[];
   investigator: string;
   previousInvestigator: string;
+  investigatorStartDate: string;
+  investigatorEndDate: string;
   startDate: string;
   endDate: string;
   acceptanceDate: string;
@@ -36,10 +74,22 @@ export interface EditorialRecord {
   nextPaymentAmount: number;
   investigatorPayment: number;
   investigatorPaid: number;
+  investigatorInvoiceNumber: string;
+  investigatorInvoiceDate: string;
+  investigatorInvoiceValue: number;
+  investigatorInvoiceLink: string;
+  investigatorInvoiceStatus: string;
   contractNumber: string;
+  contractStartDate: string;
+  contractEndDate: string;
+  contractLink: string;
   productionOrder: string;
   clientEmail: string;
   clientId: string;
+  clientPhone: string;
+  clientAddress: string;
+  clientInstitution: string;
+  driveFiles: DriveFile[];
   observations: string;
   sources: string[];
   createdAt: string;
@@ -68,8 +118,9 @@ export interface GoogleSheetsConfig {
 }
 
 export interface AppData {
-  version: 2 | 3;
+  version: 2 | 3 | 4;
   records: EditorialRecord[];
+  investigators: Investigator[];
   auditLog: AuditEntry[];
   importedAt: string;
   deletedRecords?: DeletedRecord[];
@@ -92,6 +143,7 @@ export interface Filters {
   investigator: string;
   indexation: string;
   risk: string;
+  operationalStatus: string;
   startDate: string;
   endDate: string;
 }

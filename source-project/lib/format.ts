@@ -1,4 +1,4 @@
-import type { ClientPayment, EditorialRecord } from "./types";
+import type { ClientPayment, DriveFile, EditorialRecord, Investigator, JournalAccess } from "./types";
 
 export const normalizeText = (value: unknown) =>
   String(value ?? "")
@@ -95,6 +95,41 @@ export const blankPayment = (concept = "Próximo pago"): ClientPayment => ({
   note: "",
 });
 
+export const blankJournalAccess = (): JournalAccess => ({
+  id: uid(),
+  journal: "",
+  journalLink: "",
+  loginLink: "",
+  username: "",
+  password: "",
+});
+
+export const blankDriveFile = (): DriveFile => ({
+  id: uid(),
+  name: "",
+  category: "Contrato",
+  url: "",
+});
+
+export const blankInvestigator = (): Investigator => {
+  const now = new Date().toISOString();
+  return {
+    id: uid(),
+    name: "",
+    documentId: "",
+    email: "",
+    phone: "",
+    specialty: "",
+    startDate: "",
+    endDate: "",
+    driveFolderUrl: "",
+    notes: "",
+    active: true,
+    createdAt: now,
+    updatedAt: now,
+  };
+};
+
 export const blankRecord = (): EditorialRecord => {
   const now = new Date().toISOString();
   return {
@@ -104,6 +139,7 @@ export const blankRecord = (): EditorialRecord => {
     product: "",
     indexation: "",
     status: "Pendiente",
+    operationalStatus: "Normal",
     progress: 0,
     username: "",
     password: "",
@@ -111,8 +147,12 @@ export const blankRecord = (): EditorialRecord => {
     journalLink: "",
     loginLink: "",
     apcValue: 0,
+    hasApc: false,
+    journalAccesses: [],
     investigator: "",
     previousInvestigator: "",
+    investigatorStartDate: "",
+    investigatorEndDate: "",
     startDate: "",
     endDate: "",
     acceptanceDate: "",
@@ -123,10 +163,22 @@ export const blankRecord = (): EditorialRecord => {
     nextPaymentAmount: 0,
     investigatorPayment: 0,
     investigatorPaid: 0,
+    investigatorInvoiceNumber: "",
+    investigatorInvoiceDate: "",
+    investigatorInvoiceValue: 0,
+    investigatorInvoiceLink: "",
+    investigatorInvoiceStatus: "Pendiente",
     contractNumber: "",
+    contractStartDate: "",
+    contractEndDate: "",
+    contractLink: "",
     productionOrder: "",
     clientEmail: "",
     clientId: "",
+    clientPhone: "",
+    clientAddress: "",
+    clientInstitution: "",
+    driveFiles: [],
     observations: "",
     sources: ["Registro manual"],
     createdAt: now,
@@ -157,7 +209,7 @@ export const daysFromToday = (date: string) => {
 export const paymentRisk = (record: EditorialRecord) => {
   const balance = clientBalance(record);
   if (balance <= 0) return "al-dia";
-  const days = daysFromToday(record.nextPaymentDate || record.endDate);
+  const days = daysFromToday(record.nextPaymentDate || record.contractEndDate || record.endDate);
   if (days < -30) return "critico";
   if (days < 0) return "vencido";
   if (days <= 15) return "proximo";

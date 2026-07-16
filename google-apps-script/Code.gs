@@ -12,7 +12,7 @@
  */
 
 const APP_NAME = "Control Editorial Sustainability";
-const SCHEMA_VERSION = 1;
+const SCHEMA_VERSION = 2;
 const PROP_SECRET = "SYNC_SECRET";
 const PROP_REVISION = "DATA_REVISION";
 const PROP_FINGERPRINT = "DATA_FINGERPRINT";
@@ -23,6 +23,7 @@ const SHEETS = {
   audit: "Historial",
   deleted: "Eliminados",
   config: "Configuracion",
+  investigators: "Investigadores",
 };
 
 const RECORD_HEADERS = [
@@ -32,6 +33,11 @@ const RECORD_HEADERS = [
   "Total cliente", "Saldo pendiente", "Proximo pago fecha", "Proximo pago valor",
   "Pago investigador", "Investigador pagado", "Numero contrato", "Orden produccion",
   "Email cliente", "Documento cliente", "Observaciones", "Fuentes JSON", "Creado", "Actualizado",
+  "Prioridad operativa", "Fecha inicio contrato", "Fecha fin contrato", "Link contrato",
+  "Fecha inicio investigador", "Fecha fin investigador", "Tiene APC", "Telefono cliente",
+  "Direccion cliente", "Institucion cliente", "Factura investigador numero",
+  "Factura investigador fecha", "Factura investigador valor", "Factura investigador link",
+  "Factura investigador estado", "Revistas JSON", "Drive JSON",
 ];
 
 const PAYMENT_HEADERS = [
@@ -42,6 +48,10 @@ const PAYMENT_HEADERS = [
 const AUDIT_HEADERS = ["ID", "Fecha", "Accion", "Detalle"];
 const DELETED_HEADERS = ["ID proceso", "Eliminado"];
 const CONFIG_HEADERS = ["Clave", "Valor"];
+const INVESTIGATOR_HEADERS = [
+  "ID", "Nombre", "Documento", "Email", "Telefono", "Especialidad", "Fecha ingreso",
+  "Fecha salida", "Carpeta Drive", "Notas", "Activo", "Creado", "Actualizado",
+];
 
 function doGet() {
   return jsonOutput({
@@ -73,6 +83,8 @@ function doPost(e) {
 
 function configurarHojas() {
   ensureSheets();
+  migrarDatosV2();
+  applyDropdownValidations();
   const properties = PropertiesService.getScriptProperties();
   if (properties.getProperty(PROP_REVISION) === null) properties.setProperty(PROP_REVISION, "0");
   writeConfig(getRevision());
@@ -87,6 +99,7 @@ function onOpen() {
   SpreadsheetApp.getUi()
     .createMenu("Control Editorial")
     .addItem("Configurar hojas", "configurarHojas")
+    .addItem("Migrar datos a versión 2", "migrarDatosV2")
     .addItem("Ver estado", "mostrarEstado")
     .addToUi();
 }
@@ -104,7 +117,7 @@ function mostrarEstado() {
 function onEdit(e) {
   if (!e || !e.range || e.range.getRow() < 2) return;
   const name = e.range.getSheet().getName();
-  if (![SHEETS.records, SHEETS.payments, SHEETS.deleted].includes(name)) return;
+  if (![SHEETS.records, SHEETS.payments, SHEETS.deleted, SHEETS.investigators].includes(name)) return;
   const lock = LockService.getScriptLock();
   if (!lock.tryLock(5000)) return;
   try {
@@ -115,6 +128,10 @@ function onEdit(e) {
       }
     }
     if (name === SHEETS.payments) touchPaymentRecord(e.range.getSheet(), e.range.getRow());
+    if (name === SHEETS.investigators) {
+      const updatedColumn = INVESTIGATOR_HEADERS.indexOf("Actualizado") + 1;
+      if (e.range.getColumn() !== updatedColumn) e.range.getSheet().getRange(e.range.getRow(), updatedColumn).setValue(new Date().toISOString());
+    }
     PropertiesService.getScriptProperties().deleteProperty(PROP_FINGERPRINT);
     setRevision(getRevision() + 1);
   } finally {
@@ -184,11 +201,89 @@ function ensureSheets() {
   prepareSheet(spreadsheet, SHEETS.audit, AUDIT_HEADERS, "#536e8a");
   prepareSheet(spreadsheet, SHEETS.deleted, DELETED_HEADERS, "#9a5b52");
   prepareSheet(spreadsheet, SHEETS.config, CONFIG_HEADERS, "#6c766f");
+  prepareSheet(spreadsheet, SHEETS.investigators, INVESTIGATOR_HEADERS, "#2f6f64");
+}
+
+function applyDropdownValidations() {
+  const sheet = activeSpreadsheet().getSheetByName(SHEETS.records);
+  if (!sheet || sheet.getMaxRows() < 2) return;
+  const rows = sheet.getMaxRows() - 1;
+  const lists = {
+    Producto: ["Latindex", "Scielo", "Scopus", "WoS"],
+    Indexacion: ["Latindex", "Scielo", "Q4", "Q3", "Q2", "Q1"],
+    "Prioridad operativa": ["Normal", "Urgente", "Estancado", "Espera del cliente"],
+    "Tiene APC": ["Si", "No"],
+    "Factura investigador estado": ["Pendiente", "Emitida", "Pagada", "Anulada"],
+  };
+  Object.keys(lists).forEach((header) => {
+    const column = RECORD_HEADERS.indexOf(header) + 1;
+    if (column <= 0) return;
+    const rule = SpreadsheetApp.newDataValidation().requireValueInList(lists[header], true).setAllowInvalid(false).build();
+    sheet.getRange(2, column, rows, 1).setDataValidation(rule);
+  });
+  const investigators = activeSpreadsheet().getSheetByName(SHEETS.investigators);
+  if (investigators && investigators.getMaxRows() > 1) {
+    const activeColumn = INVESTIGATOR_HEADERS.indexOf("Activo") + 1;
+    const rule = SpreadsheetApp.newDataValidation().requireValueInList(["Si", "No"], true).setAllowInvalid(false).build();
+    investigators.getRange(2, activeColumn, investigators.getMaxRows() - 1, 1).setDataValidation(rule);
+    const names = investigators.getRange(2, INVESTIGATOR_HEADERS.indexOf("Nombre") + 1, Math.max(1, investigators.getMaxRows() - 1), 1);
+    const investigatorColumn = RECORD_HEADERS.indexOf("Investigador") + 1;
+    const investigatorRule = SpreadsheetApp.newDataValidation().requireValueInRange(names, true).setAllowInvalid(true).build();
+    sheet.getRange(2, investigatorColumn, rows, 1).setDataValidation(investigatorRule);
+  }
+}
+
+function migrarDatosV2() {
+  ensureSheets();
+  const sheet = activeSpreadsheet().getSheetByName(SHEETS.records);
+  if (!sheet || sheet.getLastRow() < 2) return;
+  const rows = sheet.getRange(2, 1, sheet.getLastRow() - 1, RECORD_HEADERS.length).getValues();
+  const col = (name) => RECORD_HEADERS.indexOf(name);
+  const catalog = readInvestigators();
+  const knownInvestigators = new Set(catalog.map((item) => text(item.name).toUpperCase()));
+  rows.forEach((row) => {
+    if (!text(row[col("ID")])) return;
+    if (!text(row[col("Prioridad operativa")])) row[col("Prioridad operativa")] = "Normal";
+    if (!text(row[col("Fecha inicio contrato")])) row[col("Fecha inicio contrato")] = row[col("Fecha inicio")];
+    if (!text(row[col("Fecha fin contrato")])) row[col("Fecha fin contrato")] = row[col("Fecha fin")];
+    if (!text(row[col("Tiene APC")])) row[col("Tiene APC")] = numberValue(row[col("Valor APC")]) > 0 ? "Si" : "No";
+    if (!text(row[col("Factura investigador estado")])) row[col("Factura investigador estado")] = "Pendiente";
+    [row[col("Investigador")], row[col("Investigador anterior")]].forEach((rawName) => {
+      const name = text(rawName);
+      const key = name.toUpperCase();
+      if (!name || knownInvestigators.has(key)) return;
+      const now = new Date().toISOString();
+      catalog.push({
+        id: Utilities.getUuid(), name, documentId: "", email: "", phone: "", specialty: "",
+        startDate: "", endDate: "", driveFolderUrl: "", notes: "Migrado desde procesos existentes",
+        active: true, createdAt: now, updatedAt: now,
+      });
+      knownInvestigators.add(key);
+    });
+    if (!text(row[col("Revistas JSON")]) && [row[col("Revista")], row[col("Link revista")], row[col("Link acceso")], row[col("Usuario")], row[col("Contrasena")]].some((value) => text(value))) {
+      row[col("Revistas JSON")] = JSON.stringify([{
+        id: `${text(row[col("ID")])}-journal-1`,
+        journal: text(row[col("Revista")]),
+        journalLink: text(row[col("Link revista")]),
+        loginLink: text(row[col("Link acceso")]),
+        username: text(row[col("Usuario")]),
+        password: text(row[col("Contrasena")]),
+      }]);
+    }
+  });
+  sheet.getRange(2, 1, rows.length, RECORD_HEADERS.length).setValues(rows);
+  writeInvestigators(catalog);
+  PropertiesService.getScriptProperties().deleteProperty(PROP_FINGERPRINT);
+  setRevision(getRevision() + 1);
+  applyDropdownValidations();
 }
 
 function prepareSheet(spreadsheet, name, headers, color) {
   let sheet = spreadsheet.getSheetByName(name);
   if (!sheet) sheet = spreadsheet.insertSheet(name);
+  if (sheet.getMaxColumns() < headers.length) {
+    sheet.insertColumnsAfter(sheet.getMaxColumns(), headers.length - sheet.getMaxColumns());
+  }
   const current = sheet.getRange(1, 1, 1, headers.length).getDisplayValues()[0];
   if (current.join("|") !== headers.join("|")) sheet.getRange(1, 1, 1, headers.length).setValues([headers]);
   sheet.setFrozenRows(1);
@@ -197,9 +292,9 @@ function prepareSheet(spreadsheet, name, headers, color) {
     .setFontColor("#ffffff")
     .setFontWeight("bold")
     .setWrap(true);
-  if (!sheet.getFilter() && sheet.getMaxRows() > 1) {
-    sheet.getRange(1, 1, Math.max(2, sheet.getLastRow()), headers.length).createFilter();
-  }
+  const filter = sheet.getFilter();
+  if (filter && filter.getRange().getNumColumns() !== headers.length) filter.remove();
+  if (!sheet.getFilter() && sheet.getMaxRows() > 1) sheet.getRange(1, 1, Math.max(2, sheet.getLastRow()), headers.length).createFilter();
 }
 
 function handlePing() {
@@ -212,6 +307,7 @@ function handlePing() {
     revision: getRevision(),
     recordCount: counts.records,
     paymentCount: counts.payments,
+    investigatorCount: counts.investigators,
   };
 }
 
@@ -221,13 +317,20 @@ function handlePull(includeCredentials) {
     records.forEach((record) => {
       record.username = "";
       record.password = "";
+      record.journalAccesses = (Array.isArray(record.journalAccesses) ? record.journalAccesses : []).map((item) => ({
+        ...item,
+        username: "",
+        password: "",
+      }));
     });
   }
   return {
     ok: true,
+    schemaVersion: SCHEMA_VERSION,
     revision: getRevision(),
     serverTime: new Date().toISOString(),
     records,
+    investigators: readInvestigators(),
     auditLog: readAudit(),
     deletedRecords: readDeleted(),
   };
@@ -251,6 +354,8 @@ function handleSync(body) {
           records: pull.records,
           auditLog: pull.auditLog,
           deletedRecords: pull.deletedRecords,
+          investigators: pull.investigators,
+          schemaVersion: SCHEMA_VERSION,
         },
       };
     }
@@ -263,9 +368,10 @@ function handleSync(body) {
     }
 
     if (!body.includeCredentials) preserveStoredCredentials(records);
+    const investigators = Array.isArray(body.investigators) ? body.investigators : [];
     const audit = Array.isArray(body.auditLog) ? body.auditLog.slice(0, 500) : [];
     const deleted = Array.isArray(body.deletedRecords) ? body.deletedRecords : [];
-    const incomingFingerprint = fingerprint({ records, audit, deleted });
+    const incomingFingerprint = fingerprint({ records, investigators, audit, deleted });
     const properties = PropertiesService.getScriptProperties();
     if (properties.getProperty(PROP_FINGERPRINT) === incomingFingerprint) {
       return {
@@ -274,6 +380,7 @@ function handleSync(body) {
         serverTime: new Date().toISOString(),
         recordCount: records.length,
         paymentCount: records.reduce((sum, record) => sum + (Array.isArray(record.clientPayments) ? record.clientPayments.length : 0), 0),
+        investigatorCount: investigators.length,
         unchanged: true,
       };
     }
@@ -286,11 +393,13 @@ function handleSync(body) {
 
     writeRecords(records);
     writePayments(records);
+    writeInvestigators(investigators);
+    applyDropdownValidations();
     writeAudit(audit.slice(0, 500));
     writeDeleted(deleted);
     const revision = currentRevision + 1;
     setRevision(revision);
-    properties.setProperty(PROP_FINGERPRINT, fingerprint({ records, audit: audit.slice(0, 500), deleted }));
+    properties.setProperty(PROP_FINGERPRINT, fingerprint({ records, investigators, audit: audit.slice(0, 500), deleted }));
     SpreadsheetApp.flush();
     return {
       ok: true,
@@ -298,6 +407,7 @@ function handleSync(body) {
       serverTime: new Date().toISOString(),
       recordCount: records.length,
       paymentCount: records.reduce((sum, record) => sum + (Array.isArray(record.clientPayments) ? record.clientPayments.length : 0), 0),
+      investigatorCount: investigators.length,
     };
   } finally {
     lock.releaseLock();
@@ -311,6 +421,11 @@ function preserveStoredCredentials(incoming) {
     if (!stored) return;
     record.username = stored.username || "";
     record.password = stored.password || "";
+    const storedAccesses = new Map((Array.isArray(stored.journalAccesses) ? stored.journalAccesses : []).map((item) => [journalAccessKey(item), item]));
+    record.journalAccesses = (Array.isArray(record.journalAccesses) ? record.journalAccesses : []).map((item) => {
+      const previous = storedAccesses.get(journalAccessKey(item));
+      return { ...item, username: previous ? previous.username || "" : "", password: previous ? previous.password || "" : "" };
+    });
   });
 }
 
@@ -319,6 +434,7 @@ function getCounts() {
   return {
     records: Math.max(0, spreadsheet.getSheetByName(SHEETS.records).getLastRow() - 1),
     payments: Math.max(0, spreadsheet.getSheetByName(SHEETS.payments).getLastRow() - 1),
+    investigators: Math.max(0, spreadsheet.getSheetByName(SHEETS.investigators).getLastRow() - 1),
   };
 }
 
@@ -359,6 +475,13 @@ function recordToRow(record) {
     cell(record.contractNumber), cell(record.productionOrder), cell(record.clientEmail), cell(record.clientId),
     cell(record.observations), cell(JSON.stringify(Array.isArray(record.sources) ? record.sources : [])),
     cell(record.createdAt), cell(record.updatedAt),
+    cell(record.operationalStatus || "Normal"), cell(record.contractStartDate), cell(record.contractEndDate), cell(record.contractLink),
+    cell(record.investigatorStartDate), cell(record.investigatorEndDate), cell(record.hasApc ? "Si" : "No"),
+    cell(record.clientPhone), cell(record.clientAddress), cell(record.clientInstitution), cell(record.investigatorInvoiceNumber),
+    cell(record.investigatorInvoiceDate), numberValue(record.investigatorInvoiceValue), cell(record.investigatorInvoiceLink),
+    cell(record.investigatorInvoiceStatus || "Pendiente"),
+    cell(JSON.stringify(Array.isArray(record.journalAccesses) ? record.journalAccesses : [])),
+    cell(JSON.stringify(Array.isArray(record.driveFiles) ? record.driveFiles : [])),
   ];
 }
 
@@ -399,6 +522,23 @@ function readRecords() {
     sources: parseArray(row["Fuentes JSON"]),
     createdAt: timestampText(row.Creado),
     updatedAt: timestampText(row.Actualizado),
+    operationalStatus: text(row["Prioridad operativa"]) || "Normal",
+    contractStartDate: dateText(row["Fecha inicio contrato"]) || dateText(row["Fecha inicio"]),
+    contractEndDate: dateText(row["Fecha fin contrato"]) || dateText(row["Fecha fin"]),
+    contractLink: text(row["Link contrato"]),
+    investigatorStartDate: dateText(row["Fecha inicio investigador"]),
+    investigatorEndDate: dateText(row["Fecha fin investigador"]),
+    hasApc: booleanValue(row["Tiene APC"]) || numberValue(row["Valor APC"]) > 0,
+    clientPhone: text(row["Telefono cliente"]),
+    clientAddress: text(row["Direccion cliente"]),
+    clientInstitution: text(row["Institucion cliente"]),
+    investigatorInvoiceNumber: text(row["Factura investigador numero"]),
+    investigatorInvoiceDate: dateText(row["Factura investigador fecha"]),
+    investigatorInvoiceValue: numberValue(row["Factura investigador valor"]),
+    investigatorInvoiceLink: text(row["Factura investigador link"]),
+    investigatorInvoiceStatus: text(row["Factura investigador estado"]) || "Pendiente",
+    journalAccesses: parseArray(row["Revistas JSON"]),
+    driveFiles: parseArray(row["Drive JSON"]),
   }));
 }
 
@@ -435,6 +575,35 @@ function readPayments() {
   return grouped;
 }
 
+function writeInvestigators(items) {
+  const rows = (Array.isArray(items) ? items : []).filter((item) => item && item.id && item.name).map((item) => [
+    cell(item.id), cell(item.name), cell(item.documentId), cell(item.email), cell(item.phone), cell(item.specialty),
+    cell(item.startDate), cell(item.endDate), cell(item.driveFolderUrl), cell(item.notes), cell(item.active === false ? "No" : "Si"),
+    cell(item.createdAt), cell(item.updatedAt),
+  ]);
+  replaceRows(activeSpreadsheet().getSheetByName(SHEETS.investigators), INVESTIGATOR_HEADERS, rows);
+}
+
+function readInvestigators() {
+  return readObjects(activeSpreadsheet().getSheetByName(SHEETS.investigators), INVESTIGATOR_HEADERS)
+    .filter((row) => text(row.ID) && text(row.Nombre))
+    .map((row) => ({
+      id: text(row.ID),
+      name: text(row.Nombre),
+      documentId: text(row.Documento),
+      email: text(row.Email),
+      phone: text(row.Telefono),
+      specialty: text(row.Especialidad),
+      startDate: dateText(row["Fecha ingreso"]),
+      endDate: dateText(row["Fecha salida"]),
+      driveFolderUrl: text(row["Carpeta Drive"]),
+      notes: text(row.Notas),
+      active: booleanValue(row.Activo),
+      createdAt: timestampText(row.Creado),
+      updatedAt: timestampText(row.Actualizado),
+    }));
+}
+
 function writeAudit(entries) {
   const rows = entries.map((entry) => [cell(entry.id), cell(entry.timestamp), cell(entry.action), cell(entry.detail)]);
   replaceRows(activeSpreadsheet().getSheetByName(SHEETS.audit), AUDIT_HEADERS, rows);
@@ -461,6 +630,12 @@ function readDeleted() {
 function replaceRows(sheet, headers, rows) {
   if (!sheet) return;
   if (sheet.getFilter()) sheet.getFilter().remove();
+  if (sheet.getMaxColumns() < headers.length) {
+    sheet.insertColumnsAfter(sheet.getMaxColumns(), headers.length - sheet.getMaxColumns());
+  }
+  if (sheet.getMaxRows() < rows.length + 1) {
+    sheet.insertRowsAfter(sheet.getMaxRows(), rows.length + 1 - sheet.getMaxRows());
+  }
   sheet.clearContents();
   sheet.getRange(1, 1, 1, headers.length).setValues([headers]);
   if (rows.length) sheet.getRange(2, 1, rows.length, headers.length).setValues(rows);
@@ -504,6 +679,15 @@ function numberValue(value) {
   if (typeof value === "number" && Number.isFinite(value)) return value;
   const parsed = Number(String(value === null || value === undefined ? "" : value).replace(/[^0-9.-]/g, ""));
   return Number.isFinite(parsed) ? parsed : 0;
+}
+
+function booleanValue(value) {
+  return /^(SI|SÍ|TRUE|1|YES|ACTIVO)$/i.test(text(value));
+}
+
+function journalAccessKey(item) {
+  if (!item) return "";
+  return text(item.id) || `${text(item.journal)}|${text(item.journalLink)}|${text(item.loginLink)}`;
 }
 
 function parseArray(value) {

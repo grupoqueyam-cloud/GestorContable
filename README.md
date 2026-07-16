@@ -9,8 +9,8 @@ El software está compilado y listo para publicarse. No necesita instalar Node.j
 Para funcionar completamente requiere:
 
 1. Publicar los archivos compilados en GitHub Pages.
-2. Crear una hoja de cálculo de Google.
-3. instalar el archivo `google-apps-script/Code.gs` dentro de esa hoja.
+2. Usar la hoja de cálculo de Google ya configurada o crear una nueva.
+3. Instalar el archivo `google-apps-script/Code.gs` dentro de esa hoja.
 4. Configurar una clave privada `SYNC_SECRET`.
 5. Publicar Apps Script como aplicación web y conectar su URL `/exec` con la interfaz.
 6. Importar los dos archivos Excel iniciales desde la aplicación.
@@ -37,8 +37,18 @@ La URL de Apps Script puede estar publicada en `cloud-config.json`. La clave `SY
 
 - Dashboard general con procesos, cartera, recaudación y estados.
 - Control de clientes y temas.
-- Control de contratos y órdenes de producción.
-- Seguimiento editorial por revista, indexación y estado.
+- Formato único con todas las secciones del proceso.
+- Control de contratos con fechas de inicio, fin y enlace al documento.
+- Catálogo central de investigadores y selector de responsables.
+- Procesos agrupados por investigador, fechas de asignación, honorarios y pagos.
+- Producto desplegable: Latindex, Scielo, Scopus o WoS.
+- Indexación desplegable: Latindex, Scielo, Q4, Q3, Q2 o Q1.
+- Varias revistas por proceso, cada una con enlace, usuario y contraseña.
+- Control de APC mediante opción sin APC/con APC y valor condicional.
+- Datos de contacto e identificación del cliente.
+- Factura del investigador con número, fecha, valor, estado y enlace.
+- Archivos enlazados desde Google Drive con vista previa cuando Drive lo permite.
+- Prioridad operativa: normal, urgente, estancado o espera del cliente.
 - Avance gráfico entre 0 y 100 %.
 - Pagos del cliente, cuotas, saldos y próximo vencimiento.
 - Recuperación y antigüedad de cartera.
@@ -63,15 +73,16 @@ Cada proceso puede contener:
 - Fecha y valor del próximo pago.
 - Indexación.
 - Estado editorial.
-- Usuario y contraseña de revista.
-- Revista, enlace público y enlace de acceso.
-- Valor APC.
-- Investigador actual y anterior.
-- Fecha de inicio, finalización y aceptación.
-- Honorarios y valor pagado al investigador.
-- Número de contrato y orden de producción.
+- Una o varias revistas, enlaces públicos, enlaces de acceso, usuarios y contraseñas.
+- Condición de APC y valor, cuando aplique.
+- Investigador actual y anterior, con inicio y fin de la asignación.
+- Fecha de inicio y fin del contrato, además de las fechas del proceso y aceptación.
+- Honorarios, valor pagado y factura del investigador.
+- Número de contrato, enlace del contrato y orden de producción.
 - Total contratado con el cliente.
-- Correo y documento del cliente.
+- Correo, documento, teléfono, dirección e institución del cliente.
+- Enlaces y vista previa de archivos almacenados en Google Drive.
+- Prioridad operativa.
 - Avance porcentual.
 - Observaciones y fuentes de importación.
 
@@ -79,8 +90,8 @@ Cada proceso puede contener:
 
 ### 5.1. Reemplazar los archivos anteriores
 
-1. Descomprima `GestorContable-GitHub-Pages-ROOT.zip`.
-2. Abra la carpeta `GestorContable-GitHub-Pages-ROOT`.
+1. Descomprima `GestorContable.zip`.
+2. Abra la carpeta `GestorContable`.
 3. Suba **el contenido interno de esa carpeta** al repositorio `GestorContable`.
 4. Reemplace el `index.html` anterior.
 5. Confirme que en la raíz del repositorio existan:
@@ -125,7 +136,22 @@ Para este repositorio, la dirección esperada tiene el formato:
 https://grupoqueyam-cloud.github.io/GestorContable/
 ```
 
-## 6. Crear la base en Google Sheets
+## 6. Actualizar o crear la base en Google Sheets
+
+### Si ya utiliza la versión anterior
+
+1. Antes de actualizar, abra Google Sheets y use **Archivo → Hacer una copia** como respaldo.
+2. Abra **Extensiones → Apps Script** en la misma hoja que ya utiliza.
+3. Reemplace completamente el contenido anterior de `Code.gs` con `google-apps-script/Code.gs` de este paquete.
+4. Guarde y ejecute la función `configurarHojas`.
+5. La migración conserva los procesos y pagos existentes, agrega las columnas nuevas, crea `Investigadores`, convierte la revista anterior en el primer acceso y copia las fechas anteriores del proceso como fechas contractuales cuando todavía no existen.
+6. Los investigadores que ya aparezcan en los procesos se incorporan automáticamente al catálogo.
+7. Revise manualmente y complete las nuevas fechas de asignación de cada investigador.
+8. Publique una nueva versión de la misma implementación web como se explica en la sección 9.
+
+No cree otra hoja ni cambie `SYNC_SECRET` o `cloud-config.json` si desea conservar la conexión existente.
+
+### Si instala el sistema por primera vez
 
 1. Ingrese a Google Drive.
 2. Cree una hoja de cálculo vacía.
@@ -173,6 +199,7 @@ La función creará las siguientes pestañas:
 | `Historial` | Registro de importaciones, ediciones y sincronizaciones. |
 | `Eliminados` | Identificadores borrados y fecha de eliminación. |
 | `Configuracion` | Versión del esquema y número de revisión. |
+| `Investigadores` | Catálogo de responsables, contacto, especialidad, vigencia y carpeta de Drive. |
 
 No cambie los nombres de estas pestañas ni los encabezados de la primera fila.
 
@@ -193,7 +220,7 @@ https://script.google.com/macros/s/IDENTIFICADOR/exec
 
 No use la URL `/dev`. Si la cuenta empresarial no permite seleccionar **Cualquiera**, el administrador de Google Workspace debe habilitarlo; de lo contrario, GitHub Pages no podrá consultar el servicio sin iniciar sesión en Google.
 
-Cuando modifique `Code.gs`, abra **Implementar → Gestionar implementaciones**, edite la implementación, seleccione **Nueva versión** y vuelva a implementar.
+Cuando modifique `Code.gs`, abra **Implementar → Gestionar implementaciones**, edite la implementación existente, seleccione **Nueva versión** y vuelva a implementar. Al editar la misma implementación, la URL `/exec` normalmente se conserva y no necesita cambiar `cloud-config.json`.
 
 ## 10. Preconfigurar la URL
 
@@ -247,9 +274,11 @@ Los Excel se leen temporalmente en la memoria del navegador y sus datos se conso
 ### Crear un proceso
 
 1. Pulse **Nuevo proceso**.
-2. Complete cliente, tema, contrato, estado, fechas y valores.
-3. Agregue pagos o cuotas si corresponde.
-4. Pulse **Guardar**.
+2. Si el responsable todavía no existe, cierre el formato, abra **Investigadores** y pulse **Nuevo investigador**.
+3. Complete en el formato único los datos del cliente, contrato, producto, indexación, responsable y fechas obligatorias.
+4. Seleccione la prioridad operativa.
+5. Agregue revistas, accesos, APC, pagos, factura del investigador y archivos de Drive según corresponda.
+6. Pulse **Guardar en Google Sheets**.
 
 La pantalla se actualiza solo después de que Google Sheets confirma la escritura.
 
@@ -270,17 +299,18 @@ La pantalla se actualiza solo después de que Google Sheets confirma la escritur
 
 ### Investigadores
 
-- Asigne el investigador responsable.
-- Registre honorarios y pagos realizados.
-- Consulte el módulo de investigadores para revisar carga y valores pendientes.
+- Abra **Investigadores → Nuevo investigador** para administrar el catálogo central.
+- Solo los investigadores activos aparecen en el selector de nuevos procesos.
+- Cada ficha agrupa los procesos asignados y muestra fechas, avance, cartera asociada, honorarios y pagos pendientes.
+- Los investigadores desactivados no se eliminan y permanecen asociados a sus registros históricos.
 
 ### Búsqueda y filtros
 
-La búsqueda revisa cliente, tema, producto, contrato, revista, investigador, estado e indexación. Los filtros permiten combinar estado, responsable, indexación, riesgo de cartera y rango de fechas.
+La búsqueda revisa cliente, tema, producto, contrato, revista, investigador, estado, prioridad, institución e indexación. Los filtros permiten combinar estado, prioridad, responsable, indexación, riesgo de cartera y rango de fechas contractuales.
 
 ### Exportación
 
-Desde **Importar y exportar**, pulse **Descargar Excel**. El informe se genera con los datos vigentes obtenidos de Google Sheets.
+Desde **Importar y exportar**, pulse **Descargar Excel**. El informe contiene las pestañas `Procesos`, `Pagos cliente` e `Investigadores` con los datos vigentes obtenidos de Google Sheets.
 
 ## 14. Sincronización y trabajo simultáneo
 
@@ -302,6 +332,7 @@ Desde **Importar y exportar**, pulse **Descargar Excel**. El informe se genera c
 - La clave permanece únicamente en la memoria de la pestaña abierta.
 - Los usuarios y contraseñas de revistas se almacenan como celdas legibles para las personas con acceso a la hoja.
 - Desactive la opción de credenciales cuando no sea necesario consultarlas.
+- Los archivos de Drive no se copian al sistema: se guarda únicamente su enlace. La vista previa respeta los permisos definidos en Google Drive.
 - GitHub Pages es público; la protección de los datos depende de Apps Script y `SYNC_SECRET`.
 
 La versión actual utiliza una clave compartida para abrir la base. No incorpora cuentas individuales ni roles de acceso por empleado.
@@ -314,7 +345,7 @@ Causa: GitHub está publicando un `index.html` que intenta cargar `src/main.tsx`
 
 Solución:
 
-1. Use este paquete `GestorContable-GitHub-Pages-ROOT`.
+1. Use este paquete `GestorContable.zip`.
 2. Reemplace el `index.html` de la raíz.
 3. Suba la carpeta `assets` completa.
 4. Configure Pages en `main` y `/ (root)`.
@@ -354,6 +385,16 @@ El valor ingresado debe coincidir exactamente con `SYNC_SECRET`. Revise espacios
 - Importe los Excel desde la aplicación.
 - Revise que los encabezados no hayan sido modificados.
 
+### La aplicación pide actualizar el esquema
+
+El sitio nuevo requiere el esquema 2. Reemplace `Code.gs`, ejecute `configurarHojas` y publique una nueva versión de la implementación web. Después recargue GitHub Pages con `Ctrl + F5`.
+
+### Un archivo de Drive no muestra vista previa
+
+- Confirme que el enlace sea de Google Drive, Docs, Sheets o Slides.
+- Revise que la cuenta del usuario tenga permiso para abrirlo.
+- Algunos formatos o políticas de Google Workspace bloquean la inserción; en ese caso utilice **Abrir** para verlo en una pestaña nueva.
+
 ### No aparecen usuarios ni contraseñas
 
 Cierre la sesión, vuelva a conectarse y active **Cargar usuarios y contraseñas de revistas**. Por seguridad, la opción está desactivada inicialmente.
@@ -361,7 +402,7 @@ Cierre la sesión, vuelva a conectarse y active **Cargar usuarios y contraseñas
 ## 17. Estructura del paquete
 
 ```text
-GestorContable-GitHub-Pages-ROOT/
+GestorContable/
 ├── index.html                 página compilada para GitHub Pages
 ├── assets/                    JavaScript, ExcelJS y estilos compilados
 ├── cloud-config.json          URL pública de Apps Script
@@ -388,7 +429,9 @@ El sistema está correctamente configurado cuando:
 - La consola no intenta descargar `src/main.tsx`.
 - `favicon.svg`, los archivos de `assets/` y `cloud-config.json` responden sin error 404.
 - La URL `/exec` acepta la clave.
-- Se crean las cinco pestañas de Google Sheets.
+- Se crean las seis pestañas de Google Sheets, incluida `Investigadores`.
 - Los Excel se importan y aparecen en `Procesos`.
+- Un investigador nuevo aparece en el selector del formato de procesos.
+- Un proceso admite más de una revista y más de un archivo de Drive.
 - Un registro nuevo aparece inmediatamente en la hoja.
 - Al recargar la página, se solicita nuevamente la clave y los datos vuelven a descargarse desde Google Sheets.

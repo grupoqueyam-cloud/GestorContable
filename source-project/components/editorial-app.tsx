@@ -68,6 +68,9 @@ import {
 } from "../lib/excel";
 import {
   blankPayment,
+  blankDriveFile,
+  blankInvestigator,
+  blankJournalAccess,
   blankRecord,
   clientBalance,
   daysFromToday,
@@ -91,8 +94,11 @@ import type {
   AuditEntry,
   ClientPayment,
   EditorialRecord,
+  DriveFile,
   Filters,
   GoogleSheetsConfig,
+  Investigator,
+  JournalAccess,
   ViewKey,
 } from "../lib/types";
 
@@ -102,11 +108,15 @@ const EMPTY_FILTERS: Filters = {
   investigator: "",
   indexation: "",
   risk: "",
+  operationalStatus: "",
   startDate: "",
   endDate: "",
 };
 
 const PIE_COLORS = ["#2f8f7f", "#e3aa3d", "#d66d5d", "#5d7fa3", "#81907d", "#725ea8"];
+const INDEXATION_OPTIONS = ["Latindex", "Scielo", "Q4", "Q3", "Q2", "Q1"];
+const PRODUCT_OPTIONS = ["Latindex", "Scielo", "Scopus", "WoS"];
+const OPERATIONAL_OPTIONS = ["Normal", "Urgente", "Estancado", "Espera del cliente"] as const;
 
 const NAV_ITEMS: { key: ViewKey; label: string; icon: typeof LayoutDashboard }[] = [
   { key: "dashboard", label: "Resumen ejecutivo", icon: LayoutDashboard },
@@ -127,6 +137,7 @@ type ColumnKey =
   | "nextPayment"
   | "indexation"
   | "status"
+  | "priority"
   | "credentials"
   | "journal"
   | "link"
@@ -146,6 +157,7 @@ const COLUMN_LABELS: Record<ColumnKey, string> = {
   nextPayment: "Próximo pago",
   indexation: "Indexación",
   status: "Estado",
+  priority: "Prioridad",
   credentials: "Usuarios / contraseñas",
   journal: "Revista",
   link: "Link",
@@ -165,6 +177,7 @@ const DEFAULT_COLUMNS: ColumnKey[] = [
   "nextPayment",
   "indexation",
   "status",
+  "priority",
   "journal",
   "investigator",
   "contract",
@@ -238,8 +251,9 @@ function CloudAuthScreen({ onReady }: { onReady: (data: AppData) => void }) {
       };
       const snapshot = await pullGoogleSheets(config);
       onReady(normalizeAppData({
-        version: 3,
+        version: 4,
         records: snapshot.records,
+        investigators: snapshot.investigators,
         auditLog: snapshot.auditLog,
         deletedRecords: snapshot.deletedRecords,
         importedAt: snapshot.serverTime,
@@ -316,115 +330,233 @@ function EmptyState({ title, text, action }: { title: string; text: string; acti
   );
 }
 
+const drivePreviewUrl = (value: string) => {
+  if (!value) return "";
+  try {
+    const url = new URL(value);
+    const fileMatch = url.pathname.match(/\/file\/d\/([^/]+)/);
+    if (fileMatch) return `https://drive.google.com/file/d/${fileMatch[1]}/preview`;
+    const id = url.searchParams.get("id");
+    if (id) return `https://drive.google.com/file/d/${id}/preview`;
+    const workspaceMatch = url.pathname.match(/\/(document|spreadsheets|presentation)\/d\/([^/]+)/);
+    if (workspaceMatch) return `https://docs.google.com/${workspaceMatch[1]}/d/${workspaceMatch[2]}/preview`;
+  } catch {
+    return "";
+  }
+  return "";
+};
+
 function RecordModal({
   source,
+  investigators,
+  credentialsEnabled,
   onClose,
   onSave,
   onDelete,
 }: {
   source: EditorialRecord;
+  investigators: Investigator[];
+  credentialsEnabled: boolean;
   onClose: () => void;
   onSave: (record: EditorialRecord) => void;
   onDelete?: (record: EditorialRecord) => void;
 }) {
   const [draft, setDraft] = useState<EditorialRecord>(() => structuredClone(source));
-  const [tab, setTab] = useState<"general" | "editorial" | "finances" | "access">("general");
   const [showSecret, setShowSecret] = useState(false);
+  const [error, setError] = useState("");
+  const [preview, setPreview] = useState<DriveFile | null>(null);
   const set = <K extends keyof EditorialRecord>(key: K, value: EditorialRecord[K]) =>
     setDraft((current) => ({ ...current, [key]: value }));
   const updatePayment = (id: string, patch: Partial<ClientPayment>) =>
     setDraft((current) => ({ ...current, clientPayments: current.clientPayments.map((item) => item.id === id ? { ...item, ...patch } : item) }));
   const removePayment = (id: string) =>
     setDraft((current) => ({ ...current, clientPayments: current.clientPayments.filter((item) => item.id !== id) }));
+  const updateJournal = (id: string, patch: Partial<JournalAccess>) =>
+    setDraft((current) => ({ ...current, journalAccesses: current.journalAccesses.map((item) => item.id === id ? { ...item, ...patch } : item) }));
+  const updateDriveFile = (id: string, patch: Partial<DriveFile>) =>
+    setDraft((current) => ({ ...current, driveFiles: current.driveFiles.map((item) => item.id === id ? { ...item, ...patch } : item) }));
+  const investigatorNames = useMemo(() => {
+    const values = investigators.filter((item) => item.active).map((item) => item.name).filter(Boolean);
+    if (draft.investigator && !values.includes(draft.investigator)) values.push(draft.investigator);
+    return values.sort((a, b) => a.localeCompare(b, "es"));
+  }, [investigators, draft.investigator]);
+
   const submit = (event: FormEvent) => {
     event.preventDefault();
-    if (!draft.client.trim()) return;
-    onSave({ ...draft, progress: Math.min(100, Math.max(0, Number(draft.progress))), updatedAt: new Date().toISOString() });
+    setError("");
+    const required = [
+      [draft.client, "cliente"],
+      [draft.product, "producto"],
+      [draft.indexation, "indexación"],
+      [draft.contractStartDate, "fecha inicial del contrato"],
+      [draft.contractEndDate, "fecha final del contrato"],
+      [draft.investigator, "investigador"],
+      [draft.investigatorStartDate, "fecha inicial del investigador"],
+      [draft.investigatorEndDate, "fecha final del investigador"],
+    ];
+    const missing = required.find(([value]) => !String(value).trim());
+    if (missing) {
+      setError(`Completa el campo obligatorio: ${missing[1]}.`);
+      return;
+    }
+    if (draft.contractEndDate < draft.contractStartDate) {
+      setError("La fecha final del contrato no puede ser anterior a la fecha inicial.");
+      return;
+    }
+    if (draft.investigatorEndDate < draft.investigatorStartDate) {
+      setError("La fecha final del investigador no puede ser anterior a la fecha inicial.");
+      return;
+    }
+    const journalAccesses = draft.journalAccesses.filter((item) => [item.journal, item.journalLink, item.loginLink, item.username, item.password].some((value) => value.trim()));
+    const driveFiles = draft.driveFiles.filter((item) => item.name.trim() || item.url.trim());
+    const primary = journalAccesses[0];
+    onSave({
+      ...draft,
+      apcValue: draft.hasApc ? Math.max(0, Number(draft.apcValue) || 0) : 0,
+      journalAccesses,
+      driveFiles,
+      journal: primary?.journal || "",
+      journalLink: primary?.journalLink || "",
+      loginLink: primary?.loginLink || "",
+      username: primary?.username || "",
+      password: primary?.password || "",
+      startDate: draft.startDate || draft.contractStartDate,
+      endDate: draft.endDate || draft.contractEndDate,
+      progress: Math.min(100, Math.max(0, Number(draft.progress))),
+      updatedAt: new Date().toISOString(),
+    });
   };
 
   return (
     <div className="modal-backdrop" onMouseDown={(event) => { if (event.target === event.currentTarget) onClose(); }}>
-      <form className="modal-card record-modal" onSubmit={submit}>
+      <form className="modal-card record-modal unified-record" onSubmit={submit}>
         <header className="modal-header">
-          <div><span className="eyebrow">FICHA EDITORIAL</span><h2>{draft.client || "Nuevo proceso"}</h2><p>{draft.contractNumber || "Sin número de contrato"}</p></div>
+          <div><span className="eyebrow">FORMATO ÚNICO DEL PROCESO</span><h2>{draft.client || "Nuevo proceso"}</h2><p>{draft.contractNumber || "Complete los datos contractuales, editoriales y contables"}</p></div>
           <button type="button" className="icon-button" onClick={onClose} aria-label="Cerrar"><X /></button>
         </header>
-        <div className="modal-tabs">
-          {(["general", "editorial", "finances", "access"] as const).map((key) => (
-            <button type="button" key={key} className={tab === key ? "active" : ""} onClick={() => setTab(key)}>
-              {key === "general" ? "General" : key === "editorial" ? "Editorial" : key === "finances" ? "Finanzas" : "Accesos"}
-            </button>
-          ))}
-        </div>
-        <div className="modal-body">
-          {tab === "general" && (
-            <div className="form-grid">
-              <label className="span-2">Cliente *<input value={draft.client} onChange={(event) => set("client", event.target.value)} required /></label>
-              <label className="span-2">Tema / título<textarea value={draft.topic} onChange={(event) => set("topic", event.target.value)} rows={3} /></label>
-              <label>Producto<input value={draft.product} onChange={(event) => set("product", event.target.value)} /></label>
-              <label>N.º de contrato<input value={draft.contractNumber} onChange={(event) => set("contractNumber", event.target.value)} /></label>
-              <label>Orden de producción<input value={draft.productionOrder} onChange={(event) => set("productionOrder", event.target.value)} /></label>
-              <label>Investigador a cargo<input value={draft.investigator} onChange={(event) => set("investigator", event.target.value)} /></label>
-              <label>Investigador anterior<input value={draft.previousInvestigator} onChange={(event) => set("previousInvestigator", event.target.value)} /></label>
-              <label>Fecha de inicio<input type="date" value={draft.startDate} onChange={(event) => set("startDate", event.target.value)} /></label>
-              <label>Fecha de fin<input type="date" value={draft.endDate} onChange={(event) => set("endDate", event.target.value)} /></label>
-              <label>Estado<input value={draft.status} onChange={(event) => set("status", event.target.value)} /></label>
-              <label>Porcentaje de avance<div className="range-field"><input type="range" min="0" max="100" value={draft.progress} onChange={(event) => set("progress", Number(event.target.value))} /><strong>{draft.progress}%</strong></div></label>
-              <label>Correo del cliente<input type="email" value={draft.clientEmail} onChange={(event) => set("clientEmail", event.target.value)} /></label>
+        <div className="modal-body unified-body">
+          <section className="record-section">
+            <div className="record-section-heading"><div><span>01</span><h3>Datos del cliente</h3></div><p>Identificación y contacto del titular del contrato.</p></div>
+            <div className="form-grid three-cols">
+              <label>Cliente *<input value={draft.client} onChange={(event) => set("client", event.target.value)} required /></label>
               <label>Cédula / identificación<input value={draft.clientId} onChange={(event) => set("clientId", event.target.value)} /></label>
-              <label className="span-2">Observaciones<textarea value={draft.observations} onChange={(event) => set("observations", event.target.value)} rows={4} /></label>
+              <label>Institución / empresa<input value={draft.clientInstitution} onChange={(event) => set("clientInstitution", event.target.value)} /></label>
+              <label>Correo<input type="email" value={draft.clientEmail} onChange={(event) => set("clientEmail", event.target.value)} /></label>
+              <label>Teléfono<input value={draft.clientPhone} onChange={(event) => set("clientPhone", event.target.value)} /></label>
+              <label>Dirección<input value={draft.clientAddress} onChange={(event) => set("clientAddress", event.target.value)} /></label>
             </div>
-          )}
-          {tab === "editorial" && (
-            <div className="form-grid">
-              <label>Indexación<input value={draft.indexation} onChange={(event) => set("indexation", event.target.value)} placeholder="Scopus Q2, SciELO, Latindex…" /></label>
-              <label>Revista<input value={draft.journal} onChange={(event) => set("journal", event.target.value)} /></label>
-              <label className="span-2">Link de revista<input type="url" value={draft.journalLink} onChange={(event) => set("journalLink", event.target.value)} /></label>
-              <label className="span-2">Link de inicio de sesión<input type="url" value={draft.loginLink} onChange={(event) => set("loginLink", event.target.value)} /></label>
+          </section>
+
+          <section className="record-section">
+            <div className="record-section-heading"><div><span>02</span><h3>Contrato y proceso</h3></div><p>Todos los contratos deben registrar su periodo de vigencia.</p></div>
+            <div className="form-grid three-cols">
+              <label>N.º de contrato<input value={draft.contractNumber} onChange={(event) => set("contractNumber", event.target.value)} /></label>
+              <label>Inicio del contrato *<input type="date" value={draft.contractStartDate} onChange={(event) => set("contractStartDate", event.target.value)} required /></label>
+              <label>Fin del contrato *<input type="date" value={draft.contractEndDate} min={draft.contractStartDate} onChange={(event) => set("contractEndDate", event.target.value)} required /></label>
+              <label className="span-2">Link del contrato<input type="url" value={draft.contractLink} onChange={(event) => set("contractLink", event.target.value)} placeholder="https://drive.google.com/..." /></label>
+              <label>Orden de producción<input value={draft.productionOrder} onChange={(event) => set("productionOrder", event.target.value)} /></label>
+              <label className="span-3">Tema / título<textarea value={draft.topic} onChange={(event) => set("topic", event.target.value)} rows={3} /></label>
+              <label>Producto *<select value={draft.product} onChange={(event) => set("product", event.target.value)} required><option value="">Seleccione…</option>{draft.product && !PRODUCT_OPTIONS.includes(draft.product) && <option value={draft.product}>{draft.product} (importado)</option>}{PRODUCT_OPTIONS.map((value) => <option key={value}>{value}</option>)}</select></label>
+              <label>Estado editorial<input value={draft.status} onChange={(event) => set("status", event.target.value)} /></label>
+              <label>Prioridad operativa<select value={draft.operationalStatus} onChange={(event) => set("operationalStatus", event.target.value as EditorialRecord["operationalStatus"])}>{OPERATIONAL_OPTIONS.map((value) => <option key={value}>{value}</option>)}</select></label>
+              <label>Inicio del proceso<input type="date" value={draft.startDate} onChange={(event) => set("startDate", event.target.value)} /></label>
+              <label>Fin del proceso<input type="date" value={draft.endDate} min={draft.startDate} onChange={(event) => set("endDate", event.target.value)} /></label>
+              <label>Porcentaje de avance<div className="range-field"><input type="range" min="0" max="100" value={draft.progress} onChange={(event) => set("progress", Number(event.target.value))} /><strong>{draft.progress}%</strong></div></label>
+            </div>
+          </section>
+
+          <section className="record-section">
+            <div className="record-section-heading"><div><span>03</span><h3>Asignación del investigador</h3></div><p>El responsable se selecciona desde el catálogo de investigadores.</p></div>
+            <div className="form-grid three-cols">
+              <label>Investigador a cargo *<select value={draft.investigator} onChange={(event) => set("investigator", event.target.value)} required><option value="">Seleccione…</option>{investigatorNames.map((value) => <option key={value}>{value}</option>)}</select>{investigators.length === 0 && <small className="field-help">Registre primero al investigador en el módulo Investigadores.</small>}</label>
+              <label>Inicio de asignación *<input type="date" value={draft.investigatorStartDate} onChange={(event) => set("investigatorStartDate", event.target.value)} required /></label>
+              <label>Fin de asignación *<input type="date" value={draft.investigatorEndDate} min={draft.investigatorStartDate} onChange={(event) => set("investigatorEndDate", event.target.value)} required /></label>
+              <label>Investigador anterior<select value={draft.previousInvestigator} onChange={(event) => set("previousInvestigator", event.target.value)}><option value="">Ninguno</option>{draft.previousInvestigator && !investigatorNames.includes(draft.previousInvestigator) && <option>{draft.previousInvestigator}</option>}{investigatorNames.map((value) => <option key={value}>{value}</option>)}</select></label>
+              <label>Honorario (USD)<input type="number" min="0" step="0.01" value={draft.investigatorPayment} onChange={(event) => set("investigatorPayment", Number(event.target.value))} /></label>
+              <label>Pagado al investigador (USD)<input type="number" min="0" step="0.01" value={draft.investigatorPaid} onChange={(event) => set("investigatorPaid", Number(event.target.value))} /></label>
+            </div>
+          </section>
+
+          <section className="record-section">
+            <div className="record-section-heading"><div><span>04</span><h3>Indexación, revistas y APC</h3></div><p>Puede registrar varias revistas y credenciales dentro del mismo proceso.</p></div>
+            <div className="form-grid three-cols">
+              <label>Indexación *<select value={draft.indexation} onChange={(event) => set("indexation", event.target.value)} required><option value="">Seleccione…</option>{draft.indexation && !INDEXATION_OPTIONS.includes(draft.indexation) && <option value={draft.indexation}>{draft.indexation} (importada)</option>}{INDEXATION_OPTIONS.map((value) => <option key={value}>{value}</option>)}</select></label>
               <label>Fecha de aceptación<input type="date" value={draft.acceptanceDate} onChange={(event) => set("acceptanceDate", event.target.value)} /></label>
-              <label>Valor APC (USD)<input type="number" min="0" step="0.01" value={draft.apcValue} onChange={(event) => set("apcValue", Number(event.target.value))} /></label>
+              <label className="apc-toggle"><span>APC</span><span className="toggle-row"><input type="checkbox" checked={draft.hasApc} onChange={(event) => { set("hasApc", event.target.checked); if (!event.target.checked) set("apcValue", 0); }} /><strong>{draft.hasApc ? "Con APC" : "Sin APC"}</strong></span></label>
+              {draft.hasApc && <label>Valor APC (USD)<input type="number" min="0" step="0.01" value={draft.apcValue} onChange={(event) => set("apcValue", Number(event.target.value))} /></label>}
+            </div>
+            <div className="section-heading"><div><h3>Revistas y accesos</h3><p>Agregue una fila por cada revista utilizada.</p></div><button type="button" className="button secondary small" onClick={() => setDraft((current) => ({ ...current, journalAccesses: [...current.journalAccesses, blankJournalAccess()] }))}><Plus size={15} /> Añadir revista</button></div>
+            <div className="journal-editor">
+              {draft.journalAccesses.length === 0 && <p className="muted center">No existen revistas registradas.</p>}
+              {draft.journalAccesses.map((access) => <div className="journal-row" key={access.id}>
+                <label>Revista<input value={access.journal} onChange={(event) => updateJournal(access.id, { journal: event.target.value })} /></label>
+                <label>Link de revista<input type="url" value={access.journalLink} onChange={(event) => updateJournal(access.id, { journalLink: event.target.value })} /></label>
+                <label>Link de acceso<input type="url" value={access.loginLink} onChange={(event) => updateJournal(access.id, { loginLink: event.target.value })} /></label>
+                <label>Usuario<input value={access.username} disabled={!credentialsEnabled} placeholder={credentialsEnabled ? "Usuario" : "Active credenciales al conectar"} onChange={(event) => updateJournal(access.id, { username: event.target.value })} autoComplete="off" /></label>
+                <label>Contraseña<div className="password-field"><input type={showSecret ? "text" : "password"} value={access.password} disabled={!credentialsEnabled} placeholder={credentialsEnabled ? "Contraseña" : "Protegida"} onChange={(event) => updateJournal(access.id, { password: event.target.value })} autoComplete="new-password" /><button type="button" disabled={!credentialsEnabled} onClick={() => setShowSecret((value) => !value)}>{showSecret ? <EyeOff size={17} /> : <Eye size={17} />}</button></div></label>
+                <button type="button" className="icon-button danger journal-delete" onClick={() => setDraft((current) => ({ ...current, journalAccesses: current.journalAccesses.filter((item) => item.id !== access.id) }))}><Trash2 size={16} /></button>
+              </div>)}
+            </div>
+          </section>
+
+          <section className="record-section">
+            <div className="record-section-heading"><div><span>05</span><h3>Control contable y factura del investigador</h3></div><p>Cartera del cliente, honorarios y soporte de facturación.</p></div>
+            <div className="form-grid three-cols">
+              <label>Total contratado al cliente (USD)<input type="number" min="0" step="0.01" value={draft.clientTotal} onChange={(event) => set("clientTotal", Number(event.target.value))} /></label>
+              <label>Saldo pendiente confirmado (USD)<input type="number" min="0" step="0.01" value={draft.outstandingBalance || 0} onChange={(event) => set("outstandingBalance", Number(event.target.value))} /></label>
+              <div className="mini-balance"><span>Saldo calculado</span><strong>{formatCurrency(clientBalance(draft))}</strong></div>
+              <label>Próximo pago esperado (USD)<input type="number" min="0" step="0.01" value={draft.nextPaymentAmount} onChange={(event) => set("nextPaymentAmount", Number(event.target.value))} /></label>
+              <label>Fecha del próximo pago<input type="date" value={draft.nextPaymentDate} onChange={(event) => set("nextPaymentDate", event.target.value)} /></label>
+              <span />
+              <label>N.º de factura del investigador<input value={draft.investigatorInvoiceNumber} onChange={(event) => set("investigatorInvoiceNumber", event.target.value)} /></label>
+              <label>Fecha de factura<input type="date" value={draft.investigatorInvoiceDate} onChange={(event) => set("investigatorInvoiceDate", event.target.value)} /></label>
+              <label>Valor facturado (USD)<input type="number" min="0" step="0.01" value={draft.investigatorInvoiceValue} onChange={(event) => set("investigatorInvoiceValue", Number(event.target.value))} /></label>
+              <label className="span-2">Link de factura<input type="url" value={draft.investigatorInvoiceLink} onChange={(event) => set("investigatorInvoiceLink", event.target.value)} placeholder="https://drive.google.com/..." /></label>
+              <label>Estado de factura<select value={draft.investigatorInvoiceStatus} onChange={(event) => set("investigatorInvoiceStatus", event.target.value)}><option>Pendiente</option><option>Emitida</option><option>Pagada</option><option>Anulada</option></select></label>
+            </div>
+            <div className="section-heading"><div><h3>Pagos del cliente</h3><p>Cronograma e historial de abonos.</p></div><button type="button" className="button secondary small" onClick={() => setDraft((current) => ({ ...current, clientPayments: [...current.clientPayments, blankPayment()] }))}><Plus size={15} /> Añadir pago</button></div>
+            <div className="payment-editor">
+              {draft.clientPayments.length === 0 && <p className="muted center">No existen pagos registrados.</p>}
+              {draft.clientPayments.map((payment) => <div className="payment-row" key={payment.id}>
+                <input aria-label="Concepto" value={payment.concept} onChange={(event) => updatePayment(payment.id, { concept: event.target.value })} />
+                <input aria-label="Monto" type="number" min="0" step="0.01" value={payment.amount} onChange={(event) => updatePayment(payment.id, { amount: Number(event.target.value) })} />
+                <input aria-label="Fecha prevista" type="date" value={payment.scheduledDate} onChange={(event) => updatePayment(payment.id, { scheduledDate: event.target.value })} />
+                <select aria-label="Estado" value={payment.status} onChange={(event) => updatePayment(payment.id, { status: event.target.value as ClientPayment["status"], paidDate: event.target.value === "pagado" ? payment.paidDate || new Date().toISOString().slice(0, 10) : payment.paidDate })}><option value="pendiente">Pendiente</option><option value="parcial">Parcial</option><option value="pagado">Pagado</option><option value="vencido">Vencido</option></select>
+                <button type="button" className="icon-button danger" onClick={() => removePayment(payment.id)}><Trash2 size={16} /></button>
+              </div>)}
+            </div>
+          </section>
+
+          <section className="record-section">
+            <div className="record-section-heading"><div><span>06</span><h3>Archivos de Google Drive</h3></div><p>Enlaces de contratos, facturas, artículos, cartas y otros respaldos.</p></div>
+            <div className="section-heading"><div><h3>Documentos vinculados</h3><p>Los permisos dependen de la configuración de cada archivo en Drive.</p></div><button type="button" className="button secondary small" onClick={() => setDraft((current) => ({ ...current, driveFiles: [...current.driveFiles, blankDriveFile()] }))}><Plus size={15} /> Añadir archivo</button></div>
+            <div className="drive-editor">
+              {draft.driveFiles.length === 0 && <p className="muted center">No existen archivos vinculados.</p>}
+              {draft.driveFiles.map((file) => <div className="drive-row" key={file.id}>
+                <input aria-label="Nombre del archivo" placeholder="Nombre del archivo" value={file.name} onChange={(event) => updateDriveFile(file.id, { name: event.target.value })} />
+                <select aria-label="Categoría" value={file.category} onChange={(event) => updateDriveFile(file.id, { category: event.target.value })}><option>Contrato</option><option>Factura cliente</option><option>Factura investigador</option><option>Artículo</option><option>Carta</option><option>Otro</option></select>
+                <input aria-label="URL de Drive" type="url" placeholder="https://drive.google.com/..." value={file.url} onChange={(event) => updateDriveFile(file.id, { url: event.target.value })} />
+                <button type="button" className="button secondary small" disabled={!drivePreviewUrl(file.url)} onClick={() => setPreview(file)}><Eye size={15} /> Vista previa</button>
+                {file.url && <a className="button secondary small" href={file.url} target="_blank" rel="noreferrer"><Link2 size={15} /> Abrir</a>}
+                <button type="button" className="icon-button danger" onClick={() => { setDraft((current) => ({ ...current, driveFiles: current.driveFiles.filter((item) => item.id !== file.id) })); if (preview?.id === file.id) setPreview(null); }}><Trash2 size={16} /></button>
+              </div>)}
+            </div>
+            {preview && drivePreviewUrl(preview.url) && <div className="drive-preview"><div><strong>{preview.name || "Vista previa de Drive"}</strong><button type="button" onClick={() => setPreview(null)}><X size={16} /></button></div><iframe title={preview.name || "Archivo de Drive"} src={drivePreviewUrl(preview.url)} allow="autoplay" /></div>}
+          </section>
+
+          <section className="record-section">
+            <div className="record-section-heading"><div><span>07</span><h3>Observaciones y trazabilidad</h3></div><p>Notas internas y procedencia del registro.</p></div>
+            <div className="form-grid">
+              <label className="span-2">Observaciones<textarea value={draft.observations} onChange={(event) => set("observations", event.target.value)} rows={4} /></label>
+              <div className="privacy-note span-2"><ShieldCheck /><div><strong>Datos sensibles en Google Sheets</strong><p>Los usuarios y contraseñas se almacenan en la hoja central. Mantenga restringido el acceso.</p></div></div>
               <div className="source-box span-2"><strong>Procedencia del registro</strong>{draft.sources.map((sourceItem) => <span key={sourceItem}>{sourceItem}</span>)}</div>
             </div>
-          )}
-          {tab === "finances" && (
-            <div className="finance-form">
-              <div className="form-grid">
-                <label>Total contratado al cliente (USD)<input type="number" min="0" step="0.01" value={draft.clientTotal} onChange={(event) => set("clientTotal", Number(event.target.value))} /></label>
-                <label>Saldo pendiente confirmado (USD)<input type="number" min="0" step="0.01" value={draft.outstandingBalance || 0} onChange={(event) => set("outstandingBalance", Number(event.target.value))} /><small className="field-help">Úsalo cuando el Excel indique el saldo pero no el monto de cada abono.</small></label>
-                <label>Próximo pago esperado (USD)<input type="number" min="0" step="0.01" value={draft.nextPaymentAmount} onChange={(event) => set("nextPaymentAmount", Number(event.target.value))} /></label>
-                <label>Fecha del próximo pago<input type="date" value={draft.nextPaymentDate} onChange={(event) => set("nextPaymentDate", event.target.value)} /></label>
-                <label>Honorario del investigador (USD)<input type="number" min="0" step="0.01" value={draft.investigatorPayment} onChange={(event) => set("investigatorPayment", Number(event.target.value))} /></label>
-                <label>Pagado al investigador (USD)<input type="number" min="0" step="0.01" value={draft.investigatorPaid} onChange={(event) => set("investigatorPaid", Number(event.target.value))} /></label>
-                <div className="mini-balance"><span>Saldo calculado</span><strong>{formatCurrency(clientBalance(draft))}</strong></div>
-              </div>
-              <div className="section-heading"><div><h3>Pagos del cliente</h3><p>Cronograma e historial de abonos.</p></div><button type="button" className="button secondary small" onClick={() => setDraft((current) => ({ ...current, clientPayments: [...current.clientPayments, blankPayment()] }))}><Plus size={15} /> Añadir pago</button></div>
-              <div className="payment-editor">
-                {draft.clientPayments.length === 0 && <p className="muted center">No existen pagos registrados.</p>}
-                {draft.clientPayments.map((payment) => (
-                  <div className="payment-row" key={payment.id}>
-                    <input aria-label="Concepto" value={payment.concept} onChange={(event) => updatePayment(payment.id, { concept: event.target.value })} />
-                    <input aria-label="Monto" type="number" min="0" step="0.01" value={payment.amount} onChange={(event) => updatePayment(payment.id, { amount: Number(event.target.value) })} />
-                    <input aria-label="Fecha prevista" type="date" value={payment.scheduledDate} onChange={(event) => updatePayment(payment.id, { scheduledDate: event.target.value })} />
-                    <select aria-label="Estado" value={payment.status} onChange={(event) => updatePayment(payment.id, { status: event.target.value as ClientPayment["status"], paidDate: event.target.value === "pagado" ? payment.paidDate || new Date().toISOString().slice(0, 10) : payment.paidDate })}>
-                      <option value="pendiente">Pendiente</option><option value="parcial">Parcial</option><option value="pagado">Pagado</option><option value="vencido">Vencido</option>
-                    </select>
-                    <button type="button" className="icon-button danger" onClick={() => removePayment(payment.id)}><Trash2 size={16} /></button>
-                  </div>
-                ))}
-              </div>
-            </div>
-          )}
-          {tab === "access" && (
-            <div className="form-grid">
-              <div className="privacy-note span-2"><ShieldCheck /><div><strong>Datos sensibles en Google Sheets</strong><p>Estos campos se guardan en la hoja central y aparecen ocultos en la interfaz. Restrinja el acceso a la hoja.</p></div></div>
-              <label>Usuario<input value={draft.username} onChange={(event) => set("username", event.target.value)} autoComplete="off" /></label>
-              <label>Contraseña<div className="password-field"><input type={showSecret ? "text" : "password"} value={draft.password} onChange={(event) => set("password", event.target.value)} autoComplete="new-password" /><button type="button" onClick={() => setShowSecret((value) => !value)}>{showSecret ? <EyeOff size={17} /> : <Eye size={17} />}</button></div></label>
-            </div>
-          )}
+          </section>
+          {error && <div className="form-error record-error"><AlertCircle size={16} />{error}</div>}
         </div>
         <footer className="modal-footer">
           {onDelete ? <button type="button" className="button danger ghost" onClick={() => onDelete(draft)}><Trash2 size={16} /> Eliminar</button> : <span />}
-          <div><button type="button" className="button secondary" onClick={onClose}>Cancelar</button><button className="button primary"><Save size={16} /> Guardar cambios</button></div>
+          <div><button type="button" className="button secondary" onClick={onClose}>Cancelar</button><button className="button primary"><Save size={16} /> Guardar en Google Sheets</button></div>
         </footer>
       </form>
     </div>
@@ -448,6 +580,7 @@ function FiltersBar({ filters, setFilters, records }: { filters: Filters; setFil
           <label>Estado<select value={filters.status} onChange={(event) => setFilters({ ...filters, status: event.target.value })}><option value="">Todos</option>{statuses.map((value) => <option key={value}>{value}</option>)}</select></label>
           <label>Investigador<select value={filters.investigator} onChange={(event) => setFilters({ ...filters, investigator: event.target.value })}><option value="">Todos</option>{investigators.map((value) => <option key={value}>{value}</option>)}</select></label>
           <label>Indexación<select value={filters.indexation} onChange={(event) => setFilters({ ...filters, indexation: event.target.value })}><option value="">Todas</option>{indexations.map((value) => <option key={value}>{value}</option>)}</select></label>
+          <label>Prioridad<select value={filters.operationalStatus} onChange={(event) => setFilters({ ...filters, operationalStatus: event.target.value })}><option value="">Todas</option>{OPERATIONAL_OPTIONS.map((value) => <option key={value}>{value}</option>)}</select></label>
           <label>Riesgo de cartera<select value={filters.risk} onChange={(event) => setFilters({ ...filters, risk: event.target.value })}><option value="">Todos</option><option value="critico">Crítico (+30 días)</option><option value="vencido">Vencido</option><option value="proximo">Próximo</option><option value="al-dia">Al día</option></select></label>
           <label>Inicio desde<input type="date" value={filters.startDate} onChange={(event) => setFilters({ ...filters, startDate: event.target.value })} /></label>
           <label>Fin hasta<input type="date" value={filters.endDate} onChange={(event) => setFilters({ ...filters, endDate: event.target.value })} /></label>
@@ -484,12 +617,13 @@ function ProcessesTable({ records, onEdit }: { records: EditorialRecord[]; onEdi
                 {show("nextPayment") && <td><strong className={daysFromToday(record.nextPaymentDate) < 0 ? "text-danger" : ""}>{formatCurrency(record.nextPaymentAmount || clientBalance(record))}</strong><small className="cell-note">{formatDate(record.nextPaymentDate)}</small></td>}
                 {show("indexation") && <td><span className="soft-tag">{record.indexation || "Sin definir"}</span></td>}
                 {show("status") && <td><span className={`status-pill ${statusClass(record.status)}`}>{record.status || "Pendiente"}</span></td>}
+                {show("priority") && <td><span className={`priority-pill ${normalizeText(record.operationalStatus).toLowerCase().replace(/\s+/g, "-")}`}>{record.operationalStatus}</span></td>}
                 {show("credentials") && <td><span className="secret-cell">{record.username || "—"}<small>{record.password ? "••••••••" : "Sin contraseña"}</small></span></td>}
                 {show("journal") && <td>{record.journal || "—"}</td>}
                 {show("link") && <td>{record.journalLink ? <a className="link-button" href={record.journalLink} target="_blank" rel="noreferrer"><Link2 size={15} /> Abrir</a> : "—"}</td>}
                 {show("apc") && <td>{formatCurrency(record.apcValue)}</td>}
                 {show("investigator") && <td><span className="person-cell"><UserRound size={15} />{record.investigator || "Sin asignar"}</span></td>}
-                {show("dates") && <td><span>{formatDate(record.startDate)}</span><small className="cell-note">hasta {formatDate(record.endDate)}</small></td>}
+                {show("dates") && <td><span>{formatDate(record.contractStartDate || record.startDate)}</span><small className="cell-note">hasta {formatDate(record.contractEndDate || record.endDate)}</small></td>}
                 {show("investigatorPayment") && <td><span>{formatCurrency(record.investigatorPaid)}</span><small className="cell-note">de {formatCurrency(record.investigatorPayment)}</small></td>}
                 {show("contract") && <td className="mono">{record.contractNumber || "—"}</td>}
                 {show("progress") && <td className="progress-cell"><ProgressBar value={record.progress} compact /></td>}
@@ -582,26 +716,109 @@ function PortfolioView({ records, onEdit }: { records: EditorialRecord[]; onEdit
   );
 }
 
-function InvestigatorsView({ records }: { records: EditorialRecord[] }) {
+function InvestigatorsView({ records, investigators, onSaveCatalog, onEdit, notify }: {
+  records: EditorialRecord[];
+  investigators: Investigator[];
+  onSaveCatalog: (items: Investigator[]) => Promise<void>;
+  onEdit: (record: EditorialRecord) => void;
+  notify: (message: string, tone?: "success" | "danger") => void;
+}) {
+  const [draft, setDraft] = useState<Investigator | null>(null);
+  const [busy, setBusy] = useState(false);
   const team = useMemo(() => {
-    const map = new Map<string, EditorialRecord[]>();
-    records.forEach((record) => { const name = record.investigator || "Sin asignar"; map.set(name, [...(map.get(name) || []), record]); });
-    return Array.from(map, ([name, own]) => ({
-      name,
-      count: own.length,
-      active: own.filter((item) => item.progress < 100).length,
-      avg: Math.round(own.reduce((sum, item) => sum + item.progress, 0) / own.length),
-      portfolio: own.reduce((sum, item) => sum + clientBalance(item), 0),
-      fee: own.reduce((sum, item) => sum + item.investigatorPayment, 0),
-      paid: own.reduce((sum, item) => sum + item.investigatorPaid, 0),
-    })).sort((a, b) => b.count - a.count);
-  }, [records]);
-  return <section className="panel"><div className="panel-heading"><div><span className="eyebrow">EQUIPO DE INVESTIGACIÓN</span><h3>Carga, avance y honorarios</h3></div><span className="count-chip">{team.length} investigadores</span></div>{team.length ? <div className="team-grid">{team.map((person) => <article className="team-card" key={person.name}><div className="avatar">{person.name.split(" ").slice(0, 2).map((word) => word[0]).join("")}</div><div className="team-main"><h4>{person.name}</h4><p>{person.active} activos · {person.count} asignados</p></div><ProgressBar value={person.avg} /><div className="team-stats"><div><span>Cartera asociada</span><strong>{formatCurrency(person.portfolio)}</strong></div><div><span>Honorario</span><strong>{formatCurrency(person.fee)}</strong></div><div><span>Pendiente por pagar</span><strong>{formatCurrency(Math.max(0, person.fee - person.paid))}</strong></div></div></article>)}</div> : <EmptyState title="Sin investigadores" text="Asigna responsables a los procesos para ver su carga." />}</section>;
+    const assignments = new Map<string, EditorialRecord[]>();
+    records.forEach((record) => {
+      const name = record.investigator || "Sin asignar";
+      assignments.set(name, [...(assignments.get(name) || []), record]);
+    });
+    const names = new Set([...investigators.map((item) => item.name), ...assignments.keys()]);
+    return [...names].map((name) => {
+      const profile = investigators.find((item) => item.name === name);
+      const own = assignments.get(name) || [];
+      return {
+        profile,
+        name,
+        records: own,
+        count: own.length,
+        activeProcesses: own.filter((item) => item.progress < 100).length,
+        avg: own.length ? Math.round(own.reduce((sum, item) => sum + item.progress, 0) / own.length) : 0,
+        portfolio: own.reduce((sum, item) => sum + clientBalance(item), 0),
+        fee: own.reduce((sum, item) => sum + item.investigatorPayment, 0),
+        paid: own.reduce((sum, item) => sum + item.investigatorPaid, 0),
+      };
+    }).sort((a, b) => b.count - a.count || a.name.localeCompare(b.name, "es"));
+  }, [records, investigators]);
+
+  const saveProfile = async (event: FormEvent) => {
+    event.preventDefault();
+    if (!draft?.name.trim()) return;
+    const duplicate = investigators.some((item) => item.id !== draft.id && normalizeText(item.name).toUpperCase() === normalizeText(draft.name).toUpperCase());
+    if (duplicate) {
+      notify("Ya existe un investigador con ese nombre.", "danger");
+      return;
+    }
+    const now = new Date().toISOString();
+    const next = investigators.some((item) => item.id === draft.id)
+      ? investigators.map((item) => item.id === draft.id ? { ...draft, name: draft.name.trim(), updatedAt: now } : item)
+      : [...investigators, { ...draft, name: draft.name.trim(), createdAt: now, updatedAt: now }];
+    setBusy(true);
+    try {
+      await onSaveCatalog(next);
+      setDraft(null);
+      notify("Catálogo de investigadores actualizado.");
+    } catch (error) {
+      notify(error instanceof Error ? error.message : "No se pudo guardar el investigador.", "danger");
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const toggleActive = async (profile: Investigator) => {
+    const next = investigators.map((item) => item.id === profile.id ? { ...item, active: !item.active, updatedAt: new Date().toISOString() } : item);
+    try {
+      await onSaveCatalog(next);
+      notify(profile.active ? "Investigador marcado como inactivo." : "Investigador reactivado.");
+    } catch (error) {
+      notify(error instanceof Error ? error.message : "No se pudo actualizar el investigador.", "danger");
+    }
+  };
+
+  return <div className="view-stack">
+    <section className="panel investigator-catalog">
+      <div className="panel-heading"><div><span className="eyebrow">CATÁLOGO CENTRAL</span><h3>Administrar investigadores</h3></div><button className="button primary" onClick={() => setDraft(blankInvestigator())}><Plus size={16} /> Nuevo investigador</button></div>
+      <p className="panel-description">Los investigadores activos aparecen automáticamente en el menú del formato de procesos. Los datos se almacenan en la pestaña Investigadores de Google Sheets.</p>
+      {draft && <form className="investigator-form" onSubmit={saveProfile}>
+        <div className="form-grid three-cols">
+          <label>Nombre completo *<input value={draft.name} onChange={(event) => setDraft({ ...draft, name: event.target.value })} required autoFocus /></label>
+          <label>Cédula / identificación<input value={draft.documentId} onChange={(event) => setDraft({ ...draft, documentId: event.target.value })} /></label>
+          <label>Especialidad<input value={draft.specialty} onChange={(event) => setDraft({ ...draft, specialty: event.target.value })} /></label>
+          <label>Correo<input type="email" value={draft.email} onChange={(event) => setDraft({ ...draft, email: event.target.value })} /></label>
+          <label>Teléfono<input value={draft.phone} onChange={(event) => setDraft({ ...draft, phone: event.target.value })} /></label>
+          <label>Estado<select value={draft.active ? "activo" : "inactivo"} onChange={(event) => setDraft({ ...draft, active: event.target.value === "activo" })}><option value="activo">Activo</option><option value="inactivo">Inactivo</option></select></label>
+          <label>Fecha de ingreso<input type="date" value={draft.startDate} onChange={(event) => setDraft({ ...draft, startDate: event.target.value })} /></label>
+          <label>Fecha de salida<input type="date" min={draft.startDate} value={draft.endDate} onChange={(event) => setDraft({ ...draft, endDate: event.target.value })} /></label>
+          <label>Carpeta de Drive<input type="url" value={draft.driveFolderUrl} onChange={(event) => setDraft({ ...draft, driveFolderUrl: event.target.value })} /></label>
+          <label className="span-3">Notas<textarea rows={3} value={draft.notes} onChange={(event) => setDraft({ ...draft, notes: event.target.value })} /></label>
+        </div>
+        <div className="inline-actions"><button type="button" className="button secondary" onClick={() => setDraft(null)}>Cancelar</button><button className="button primary" disabled={busy}>{busy ? <RefreshCw className="spin" size={16} /> : <Save size={16} />} Guardar investigador</button></div>
+      </form>}
+    </section>
+    <section className="panel">
+      <div className="panel-heading"><div><span className="eyebrow">PROCESOS AGRUPADOS POR RESPONSABLE</span><h3>Carga, fechas, avance y honorarios</h3></div><span className="count-chip">{team.filter((item) => item.name !== "Sin asignar").length} investigadores</span></div>
+      {team.length ? <div className="team-grid grouped-team-grid">{team.map((person) => <article className={`team-card grouped-team-card ${person.profile && !person.profile.active ? "inactive" : ""}`} key={person.name}>
+        <div className="team-card-head"><div className="avatar">{person.name.split(" ").slice(0, 2).map((word) => word[0]).join("")}</div><div className="team-main"><h4>{person.name}</h4><p>{person.profile?.specialty || "Sin especialidad"} · {person.activeProcesses} activos de {person.count}</p></div>{person.profile && <div className="team-actions"><button className="icon-button" onClick={() => setDraft(structuredClone(person.profile!))} aria-label={`Editar ${person.name}`}><Pencil size={15} /></button><button className="button secondary small" onClick={() => toggleActive(person.profile!)}>{person.profile.active ? "Desactivar" : "Activar"}</button></div>}</div>
+        <ProgressBar value={person.avg} />
+        <div className="team-stats"><div><span>Cartera asociada</span><strong>{formatCurrency(person.portfolio)}</strong></div><div><span>Honorario</span><strong>{formatCurrency(person.fee)}</strong></div><div><span>Pendiente por pagar</span><strong>{formatCurrency(Math.max(0, person.fee - person.paid))}</strong></div></div>
+        {person.profile?.driveFolderUrl && <a className="link-button" href={person.profile.driveFolderUrl} target="_blank" rel="noreferrer"><Link2 size={15} /> Abrir carpeta de Drive</a>}
+        <div className="investigator-processes"><strong>Procesos asignados</strong>{person.records.length ? person.records.map((record) => <button key={record.id} onClick={() => onEdit(record)}><span><b>{record.client}</b><small>{record.topic || record.product}</small></span><span><b>{record.operationalStatus}</b><small>{formatDate(record.investigatorStartDate)} — {formatDate(record.investigatorEndDate)}</small></span><ProgressBar value={record.progress} compact /></button>) : <p>Sin procesos asignados.</p>}</div>
+      </article>)}</div> : <EmptyState title="Sin investigadores" text="Registre al equipo y asígnelo a los procesos." />}
+    </section>
+  </div>;
 }
 
 function ContractsView({ records, onEdit }: { records: EditorialRecord[]; onEdit: (record: EditorialRecord) => void }) {
   const contracts = records.filter((record) => record.contractNumber);
-  return <section className="panel"><div className="panel-heading"><div><span className="eyebrow">CONTRATOS</span><h3>Registro contractual consolidado</h3></div><span className="count-chip">{contracts.length} con número</span></div>{contracts.length ? <div className="contract-grid">{contracts.map((record) => <button key={record.id} className="contract-card" onClick={() => onEdit(record)}><div className="contract-icon"><FileText /></div><div><span className="mono">{record.contractNumber}</span><h4>{record.client}</h4><p>{record.topic || record.product || "Sin detalle del producto"}</p></div><div className="contract-side"><span className={`status-pill ${statusClass(record.status)}`}>{statusBucket(record.status)}</span><strong>{formatCurrency(record.clientTotal)}</strong><ProgressBar value={record.progress} compact /></div></button>)}</div> : <EmptyState title="No hay contratos registrados" text="Los procesos sin número permanecen disponibles en Procesos editoriales." />}</section>;
+  return <section className="panel"><div className="panel-heading"><div><span className="eyebrow">CONTRATOS</span><h3>Registro contractual consolidado</h3></div><span className="count-chip">{contracts.length} con número</span></div>{contracts.length ? <div className="contract-grid">{contracts.map((record) => <div key={record.id} className="contract-card"><button className="contract-main-button" onClick={() => onEdit(record)}><div className="contract-icon"><FileText /></div><div><span className="mono">{record.contractNumber}</span><h4>{record.client}</h4><p>{record.topic || record.product || "Sin detalle del producto"}</p><small>{formatDate(record.contractStartDate)} — {formatDate(record.contractEndDate)}</small></div><div className="contract-side"><span className={`priority-pill ${normalizeText(record.operationalStatus).toLowerCase().replace(/\s+/g, "-")}`}>{record.operationalStatus}</span><strong>{formatCurrency(record.clientTotal)}</strong><ProgressBar value={record.progress} compact /></div></button>{record.contractLink && <a className="contract-link" href={record.contractLink} target="_blank" rel="noreferrer"><Link2 size={15} /> Ver contrato</a>}</div>)}</div> : <EmptyState title="No hay contratos registrados" text="Los procesos sin número permanecen disponibles en Procesos editoriales." />}</section>;
 }
 
 function AlertsView({ records, onEdit }: { records: EditorialRecord[]; onEdit: (record: EditorialRecord) => void }) {
@@ -611,10 +828,12 @@ function AlertsView({ records, onEdit }: { records: EditorialRecord[]; onEdit: (
       const days = daysFromToday(record.nextPaymentDate);
       if (days <= 30) items.push({ id: `${record.id}-payment`, record, kind: days < 0 ? "Pago vencido" : "Próximo pago", date: record.nextPaymentDate, days, tone: days < 0 ? "danger" : "warning", detail: formatCurrency(record.nextPaymentAmount || clientBalance(record)) });
     }
-    if (record.endDate && record.progress < 100) {
-      const days = daysFromToday(record.endDate);
-      if (days <= 30) items.push({ id: `${record.id}-end`, record, kind: days < 0 ? "Plazo contractual vencido" : "Fin de contrato", date: record.endDate, days, tone: days < 0 ? "danger" : "info", detail: `${record.progress}% de avance` });
+    const contractEnd = record.contractEndDate || record.endDate;
+    if (contractEnd && record.progress < 100) {
+      const days = daysFromToday(contractEnd);
+      if (days <= 30) items.push({ id: `${record.id}-end`, record, kind: days < 0 ? "Plazo contractual vencido" : "Fin de contrato", date: contractEnd, days, tone: days < 0 ? "danger" : "info", detail: `${record.progress}% de avance` });
     }
+    if (["Urgente", "Estancado", "Espera del cliente"].includes(record.operationalStatus)) items.push({ id: `${record.id}-priority`, record, kind: record.operationalStatus, date: contractEnd || record.updatedAt.slice(0, 10), days: 0, tone: record.operationalStatus === "Urgente" ? "danger" : "warning", detail: record.investigator || "Sin investigador" });
     return items;
   }).sort((a, b) => a.days - b.days), [records]);
   return <div className="view-stack"><section className="alert-hero"><div><span className="eyebrow">AGENDA DE ACCIÓN</span><h3>{alerts.filter((item) => item.days < 0).length} vencimientos requieren atención</h3><p>Pagos e hitos contractuales calculados con las fechas disponibles.</p></div><CalendarClock /></section><section className="panel">{alerts.length ? <div className="alerts-list">{alerts.map((alert) => <button key={alert.id} onClick={() => onEdit(alert.record)}><div className={`alert-icon ${alert.tone}`}>{alert.tone === "danger" ? <AlertCircle /> : <CalendarClock />}</div><div><span className="eyebrow">{alert.kind}</span><h4>{alert.record.client}</h4><p>{alert.record.contractNumber || alert.record.topic || "Sin referencia"}</p></div><div className="alert-detail"><strong>{alert.detail}</strong><span>{formatDate(alert.date)}</span><small>{alert.days < 0 ? `${Math.abs(alert.days)} días vencido` : alert.days === 0 ? "Vence hoy" : `En ${alert.days} días`}</small></div></button>)}</div> : <EmptyState title="Sin alertas próximas" text="No existen pagos o fechas de fin dentro de los próximos 30 días." />}</section></div>;
@@ -774,7 +993,7 @@ function DataView({
       {busy && <div className="busy-banner"><RefreshCw className="spin" />{busy}</div>}
       <section className="data-actions cloud-data-actions">
         <article><div className="data-icon green"><Upload /></div><h3>Importar Excel a Google Sheets</h3><p>Los archivos se procesan en memoria y sus registros se guardan inmediatamente en la base central.</p><input ref={excelRef} type="file" accept=".xlsx,.xls" multiple hidden onChange={(event) => importFiles(event.target.files)} /><button className="button primary" onClick={() => excelRef.current?.click()}><FileSpreadsheet size={16} /> Seleccionar archivos</button></article>
-        <article><div className="data-icon blue"><Download /></div><h3>Exportar reporte</h3><p>Genera un Excel desde los datos vigentes descargados de Google Sheets.</p><button className="button secondary" onClick={async () => { setBusy("Generando Excel…"); try { await exportWorkbook(data.records); notify("Reporte Excel generado."); } finally { setBusy(""); } }}><Download size={16} /> Descargar Excel</button></article>
+        <article><div className="data-icon blue"><Download /></div><h3>Exportar reporte</h3><p>Genera un Excel con procesos, pagos e investigadores desde los datos vigentes de Google Sheets.</p><button className="button secondary" onClick={async () => { setBusy("Generando Excel…"); try { await exportWorkbook(data.records, data.investigators); notify("Reporte Excel generado."); } finally { setBusy(""); } }}><Download size={16} /> Descargar Excel</button></article>
       </section>
       <section className="data-grid">
         <article className="panel"><div className="panel-heading"><div><span className="eyebrow">ALMACENAMIENTO</span><h3>Modo exclusivamente remoto</h3></div><Cloud /></div><div className="remote-storage-card"><strong>{data.records.length} procesos en Google Sheets</strong><p>No se usa almacenamiento persistente del navegador ni una base incluida en GitHub. Cada creación, edición, eliminación o importación debe confirmarse en la hoja antes de actualizar la pantalla.</p><span><ShieldCheck size={15} /> La clave desaparece al cerrar o recargar la pestaña.</span></div></article>
@@ -875,14 +1094,17 @@ export default function EditorialApp() {
     if (!data) return [];
     const query = normalizeText(filters.search).toUpperCase();
     return data.records.filter((record) => {
-      const haystack = normalizeText([record.client, record.topic, record.product, record.contractNumber, record.journal, record.investigator, record.status, record.indexation].join(" ")).toUpperCase();
+      const haystack = normalizeText([record.client, record.topic, record.product, record.contractNumber, record.journal, record.investigator, record.status, record.operationalStatus, record.indexation, record.clientEmail, record.clientInstitution].join(" ")).toUpperCase();
       if (query && !haystack.includes(query)) return false;
       if (filters.status && statusBucket(record.status) !== filters.status) return false;
       if (filters.investigator && record.investigator !== filters.investigator) return false;
       if (filters.indexation && record.indexation !== filters.indexation) return false;
       if (filters.risk && paymentRisk(record) !== filters.risk) return false;
-      if (filters.startDate && record.startDate && record.startDate < filters.startDate) return false;
-      if (filters.endDate && record.endDate && record.endDate > filters.endDate) return false;
+      if (filters.operationalStatus && record.operationalStatus !== filters.operationalStatus) return false;
+      const contractStart = record.contractStartDate || record.startDate;
+      const contractEnd = record.contractEndDate || record.endDate;
+      if (filters.startDate && contractStart && contractStart < filters.startDate) return false;
+      if (filters.endDate && contractEnd && contractEnd > filters.endDate) return false;
       return true;
     });
   }, [data, filters]);
@@ -914,7 +1136,10 @@ export default function EditorialApp() {
     }
   };
   const saveGoogleConfig = async (config: GoogleSheetsConfig) => {
-    await persist(addAudit({ ...data, googleSheets: config, version: 3 }, "Google Sheets", "Configuración de sincronización actualizada"));
+    await persist(addAudit({ ...data, googleSheets: config, version: 4 }, "Google Sheets", "Configuración de sincronización actualizada"));
+  };
+  const saveInvestigators = async (investigators: Investigator[]) => {
+    await persist(addAudit({ ...data, investigators, version: 4 }, "Investigadores", `Catálogo actualizado: ${investigators.length} registros`));
   };
   const title = NAV_ITEMS.find((item) => item.key === view)?.label || "Control editorial";
 
@@ -936,14 +1161,14 @@ export default function EditorialApp() {
           {view === "dashboard" && <Dashboard records={data.records} onEdit={setEditing} onNavigate={setView} />}
           {view === "processes" && <><FiltersBar filters={filters} setFilters={setFilters} records={data.records} /><ProcessesTable records={filtered} onEdit={setEditing} /></>}
           {view === "portfolio" && <PortfolioView records={data.records} onEdit={setEditing} />}
-          {view === "investigators" && <InvestigatorsView records={data.records} />}
+          {view === "investigators" && <InvestigatorsView records={data.records} investigators={data.investigators} onSaveCatalog={saveInvestigators} onEdit={setEditing} notify={notify} />}
           {view === "contracts" && <ContractsView records={data.records} onEdit={setEditing} />}
           {view === "alerts" && <AlertsView records={data.records} onEdit={setEditing} />}
           {view === "google" && <GoogleSheetsView data={data} onSave={saveGoogleConfig} onSync={() => runGoogleSync(true)} syncState={syncState} notify={notify} />}
           {view === "data" && <DataView data={data} onData={persist} notify={notify} />}
         </div>
       </main>
-      {(editing || newRecord) && <RecordModal source={editing || blankRecord()} onClose={() => { setEditing(null); setNewRecord(false); }} onSave={saveRecord} onDelete={editing ? deleteRecord : undefined} />}
+      {(editing || newRecord) && <RecordModal source={editing || blankRecord()} investigators={data.investigators} credentialsEnabled={Boolean(data.googleSheets?.includeCredentials)} onClose={() => { setEditing(null); setNewRecord(false); }} onSave={saveRecord} onDelete={editing ? deleteRecord : undefined} />}
       {toast && <div className={`toast ${toast.tone}`}><span>{toast.tone === "success" ? <Check /> : <AlertCircle />}</span>{toast.message}</div>}
     </div>
   );
