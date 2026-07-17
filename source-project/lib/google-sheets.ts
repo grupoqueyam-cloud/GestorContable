@@ -5,10 +5,12 @@ import type {
   EditorialRecord,
   GoogleSheetsConfig,
   Investigator,
+  InvestigatorAssignment,
+  InvestigatorInstallment,
   JournalAccess,
 } from "./types";
 
-const REQUIRED_SCHEMA_VERSION = 2;
+const REQUIRED_SCHEMA_VERSION = 3;
 
 export interface GoogleSheetsSnapshot {
   schemaVersion: number;
@@ -28,6 +30,8 @@ interface ApiResponse extends Partial<GoogleSheetsSnapshot> {
   recordCount?: number;
   paymentCount?: number;
   investigatorCount?: number;
+  clientCount?: number;
+  assignmentCount?: number;
   snapshot?: GoogleSheetsSnapshot;
 }
 
@@ -88,9 +92,111 @@ const normalizeJournalAccesses = (record: EditorialRecord): JournalAccess[] => {
   }));
 };
 
+const installmentStatus = (paidAmount: number, amount: number) => {
+  if (amount > 0 && paidAmount >= amount) return "pagado" as const;
+  if (paidAmount > 0) return "parcial" as const;
+  return "pendiente" as const;
+};
+
+const normalizeInstallment = (
+  raw: Partial<InvestigatorInstallment> | undefined,
+  number: 1 | 2,
+  fallbackAmount = 0,
+): InvestigatorInstallment => {
+  const amount = Math.max(0, Number(raw?.amount) || fallbackAmount);
+  const paidAmount = Math.max(0, Math.min(Number(raw?.paidAmount) || 0, amount || Number(raw?.paidAmount) || 0));
+  return {
+    number,
+    amount,
+    paidAmount,
+    scheduledDate: raw?.scheduledDate || "",
+    paidDate: raw?.paidDate || "",
+    status: installmentStatus(paidAmount, amount),
+  };
+};
+
+const legacyAssignments = (record: EditorialRecord): InvestigatorAssignment[] => {
+  const currentInvestigator = String(record.investigator || "").trim();
+  const previousInvestigator = String(record.previousInvestigator || "").trim();
+  if (!currentInvestigator && !previousInvestigator) return [];
+  const paid = Math.max(0, Number(record.investigatorPaid) || 0);
+  const fee = Math.max(0, Number(record.investigatorPayment) || 0, paid);
+  const firstAmount = Math.round((fee / 2) * 100) / 100;
+  const secondAmount = Math.max(0, Math.round((fee - firstAmount) * 100) / 100);
+  const firstPaid = Math.min(paid, firstAmount || paid);
+  const secondPaid = Math.max(0, Math.min(paid - firstPaid, secondAmount));
+  const now = record.updatedAt || new Date().toISOString();
+  const history: InvestigatorAssignment[] = [];
+  if (previousInvestigator && previousInvestigator.toLocaleUpperCase("es") !== currentInvestigator.toLocaleUpperCase("es")) {
+    history.push({
+      id: `${record.id || "legacy"}-assignment-previous`,
+      investigator: previousInvestigator,
+      startDate: record.contractStartDate || record.startDate || "",
+      endDate: record.investigatorStartDate || record.endDate || record.contractEndDate || "",
+      agreedPayment: 0,
+      installments: [normalizeInstallment(undefined, 1), normalizeInstallment(undefined, 2)],
+      notes: "Migrado como investigador anterior; revise fechas y honorarios",
+      isCurrent: false,
+      createdAt: record.createdAt || now,
+      updatedAt: now,
+    });
+  }
+  if (!currentInvestigator) return history;
+  history.push({
+    id: `${record.id || "legacy"}-assignment-1`,
+    investigator: currentInvestigator,
+    startDate: record.investigatorStartDate || record.startDate || "",
+    endDate: record.investigatorEndDate || record.endDate || "",
+    agreedPayment: fee,
+    installments: [
+      normalizeInstallment({ amount: firstAmount, paidAmount: firstPaid }, 1),
+      normalizeInstallment({ amount: secondAmount, paidAmount: secondPaid }, 2),
+    ],
+    notes: "Migrado desde el registro anterior",
+    isCurrent: true,
+    createdAt: record.createdAt || now,
+    updatedAt: now,
+  });
+  return history;
+};
+
+const normalizeInvestigatorHistory = (record: EditorialRecord): InvestigatorAssignment[] => {
+  const source = Array.isArray(record.investigatorHistory) && record.investigatorHistory.length
+    ? record.investigatorHistory
+    : legacyAssignments(record);
+  const normalized = source.filter((item) => item?.investigator).map((item, index) => {
+    const fee = Math.max(0, Number(item.agreedPayment) || 0);
+    const half = Math.round((fee / 2) * 100) / 100;
+    const installments = Array.isArray(item.installments) ? item.installments : [];
+    return {
+      id: item.id || `${record.id || "process"}-assignment-${index + 1}`,
+      investigator: item.investigator || "",
+      startDate: item.startDate || "",
+      endDate: item.endDate || "",
+      agreedPayment: fee,
+      installments: [
+        normalizeInstallment(installments[0], 1, half),
+        normalizeInstallment(installments[1], 2, Math.max(0, fee - half)),
+      ] as [InvestigatorInstallment, InvestigatorInstallment],
+      notes: item.notes || "",
+      isCurrent: Boolean(item.isCurrent),
+      createdAt: item.createdAt || record.createdAt || new Date().toISOString(),
+      updatedAt: item.updatedAt || record.updatedAt || new Date().toISOString(),
+    };
+  });
+  if (!normalized.length) return [];
+  const currentIndex = normalized.map((item) => item.isCurrent).lastIndexOf(true);
+  const selected = currentIndex >= 0 ? currentIndex : normalized.length - 1;
+  return normalized.map((item, index) => ({ ...item, isCurrent: index === selected }));
+};
+
 const normalizeRecord = (record: EditorialRecord): EditorialRecord => {
   const journalAccesses = normalizeJournalAccesses(record);
   const primary = journalAccesses[0];
+  const investigatorHistory = normalizeInvestigatorHistory(record);
+  const currentAssignment = investigatorHistory.find((item) => item.isCurrent) || investigatorHistory.at(-1);
+  const previousAssignment = [...investigatorHistory].reverse().find((item) => item.id !== currentAssignment?.id);
+  const currentPaid = currentAssignment?.installments.reduce((sum, item) => sum + item.paidAmount, 0) || 0;
   return {
     ...record,
     operationalStatus: record.operationalStatus || "Normal",
@@ -104,8 +210,13 @@ const normalizeRecord = (record: EditorialRecord): EditorialRecord => {
     contractStartDate: record.contractStartDate || record.startDate || "",
     contractEndDate: record.contractEndDate || record.endDate || "",
     contractLink: record.contractLink || "",
-    investigatorStartDate: record.investigatorStartDate || "",
-    investigatorEndDate: record.investigatorEndDate || "",
+    investigator: currentAssignment?.investigator || record.investigator || "",
+    previousInvestigator: previousAssignment?.investigator || record.previousInvestigator || "",
+    investigatorStartDate: currentAssignment?.startDate || record.investigatorStartDate || "",
+    investigatorEndDate: currentAssignment?.endDate || record.investigatorEndDate || "",
+    investigatorPayment: currentAssignment?.agreedPayment ?? (Number(record.investigatorPayment) || 0),
+    investigatorPaid: currentAssignment ? currentPaid : (Number(record.investigatorPaid) || 0),
+    investigatorHistory,
     investigatorInvoiceNumber: record.investigatorInvoiceNumber || "",
     investigatorInvoiceDate: record.investigatorInvoiceDate || "",
     investigatorInvoiceValue: Number(record.investigatorInvoiceValue) || 0,
@@ -138,7 +249,7 @@ const normalizeInvestigator = (investigator: Investigator): Investigator => ({
 
 export const normalizeAppData = (data: AppData): AppData => ({
   ...data,
-  version: 4,
+  version: 5,
   records: Array.isArray(data.records) ? data.records.map(normalizeRecord) : [],
   investigators: Array.isArray(data.investigators) ? data.investigators.map(normalizeInvestigator) : [],
   auditLog: Array.isArray(data.auditLog) ? data.auditLog : [],
@@ -326,6 +437,8 @@ export const testGoogleSheetsConnection = async (config: GoogleSheetsConfig) => 
     records: Number(result.recordCount || 0),
     payments: Number(result.paymentCount || 0),
     investigators: Number(result.investigatorCount || 0),
+    clients: Number(result.clientCount || 0),
+    assignments: Number(result.assignmentCount || 0),
     schemaVersion: Number(result.schemaVersion || 0),
     serverTime: result.serverTime || "",
   };
@@ -376,7 +489,7 @@ export const syncGoogleSheets = async (source: AppData): Promise<SyncResult> => 
       return {
         data: normalizeAppData({
           ...merged,
-          version: 4,
+          version: 5,
           googleSheets: { ...config, remoteRevision, lastSyncAt },
         }),
         remoteRevision,

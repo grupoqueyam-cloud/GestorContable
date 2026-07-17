@@ -70,6 +70,7 @@ import {
   blankPayment,
   blankDriveFile,
   blankInvestigator,
+  blankInvestigatorAssignment,
   blankJournalAccess,
   blankRecord,
   clientBalance,
@@ -98,6 +99,8 @@ import type {
   Filters,
   GoogleSheetsConfig,
   Investigator,
+  InvestigatorAssignment,
+  InvestigatorInstallment,
   JournalAccess,
   ViewKey,
 } from "../lib/types";
@@ -116,10 +119,12 @@ const EMPTY_FILTERS: Filters = {
 const PIE_COLORS = ["#2f8f7f", "#e3aa3d", "#d66d5d", "#5d7fa3", "#81907d", "#725ea8"];
 const INDEXATION_OPTIONS = ["Latindex", "Scielo", "Q4", "Q3", "Q2", "Q1"];
 const PRODUCT_OPTIONS = ["Latindex", "Scielo", "Scopus", "WoS"];
+const EDITORIAL_STATUS_OPTIONS = ["Pendiente", "Finalizado", "Elaboración", "Espera del cliente", "Por asignar"];
 const OPERATIONAL_OPTIONS = ["Normal", "Urgente", "Estancado", "Espera del cliente"] as const;
 
 const NAV_ITEMS: { key: ViewKey; label: string; icon: typeof LayoutDashboard }[] = [
   { key: "dashboard", label: "Resumen ejecutivo", icon: LayoutDashboard },
+  { key: "clients", label: "Clientes", icon: UserRound },
   { key: "processes", label: "Procesos editoriales", icon: ClipboardList },
   { key: "portfolio", label: "Recuperación de cartera", icon: WalletCards },
   { key: "investigators", label: "Investigadores", icon: UsersRound },
@@ -187,19 +192,16 @@ const DEFAULT_COLUMNS: ColumnKey[] = [
 const statusBucket = (status: string) => {
   const value = normalizeText(status).toUpperCase();
   if (/PUBLICAD|FINALIZAD|CERRAD/.test(value)) return "Finalizado";
-  if (/ACEPTAD/.test(value)) return "Aceptado";
-  if (/CORRECCION|PARES|REVISION/.test(value)) return "En revisión";
-  if (/ENVIAD|SUBID|REVISTA/.test(value)) return "En revista";
-  if (/RECHAZAD/.test(value)) return "Rechazado";
-  if (/PAUSAD|PENDIENTE|ESPERA/.test(value)) return "Pendiente";
-  return "En desarrollo";
+  if (/ESPERA.*CLIENTE/.test(value)) return "Espera del cliente";
+  if (/POR.*ASIGNAR|SIN.*ASIGNAR/.test(value)) return "Por asignar";
+  if (/ELABOR|DESARROLL|PROCESO|CORRECCION|PARES|REVISION|ENVIAD|SUBID|REVISTA|ACEPTAD/.test(value)) return "Elaboración";
+  return "Pendiente";
 };
 
 const statusClass = (status: string) => {
   const bucket = statusBucket(status);
-  if (["Finalizado", "Aceptado"].includes(bucket)) return "success";
-  if (["Rechazado"].includes(bucket)) return "danger";
-  if (["Pendiente"].includes(bucket)) return "warning";
+  if (bucket === "Finalizado") return "success";
+  if (["Pendiente", "Espera del cliente", "Por asignar"].includes(bucket)) return "warning";
   return "info";
 };
 
@@ -251,7 +253,7 @@ function CloudAuthScreen({ onReady }: { onReady: (data: AppData) => void }) {
       };
       const snapshot = await pullGoogleSheets(config);
       onReady(normalizeAppData({
-        version: 4,
+        version: 5,
         records: snapshot.records,
         investigators: snapshot.investigators,
         auditLog: snapshot.auditLog,
@@ -358,7 +360,7 @@ function RecordModal({
   investigators: Investigator[];
   credentialsEnabled: boolean;
   onClose: () => void;
-  onSave: (record: EditorialRecord) => void;
+  onSave: (record: EditorialRecord, addAnotherContract?: boolean) => void;
   onDelete?: (record: EditorialRecord) => void;
 }) {
   const [draft, setDraft] = useState<EditorialRecord>(() => structuredClone(source));
@@ -375,11 +377,69 @@ function RecordModal({
     setDraft((current) => ({ ...current, journalAccesses: current.journalAccesses.map((item) => item.id === id ? { ...item, ...patch } : item) }));
   const updateDriveFile = (id: string, patch: Partial<DriveFile>) =>
     setDraft((current) => ({ ...current, driveFiles: current.driveFiles.map((item) => item.id === id ? { ...item, ...patch } : item) }));
+  const updateAssignment = (id: string, patch: Partial<InvestigatorAssignment>) =>
+    setDraft((current) => ({
+      ...current,
+      investigatorHistory: current.investigatorHistory.map((item) => item.id === id
+        ? { ...item, ...patch, updatedAt: new Date().toISOString() }
+        : item),
+    }));
+  const updateAssignmentPayment = (id: string, value: number) =>
+    setDraft((current) => ({
+      ...current,
+      investigatorHistory: current.investigatorHistory.map((item) => {
+        if (item.id !== id) return item;
+        const agreedPayment = Math.max(0, Number(value) || 0);
+        const previousTotal = item.installments.reduce((sum, installment) => sum + installment.amount, 0);
+        const canSplit = item.installments.every((installment) => installment.paidAmount === 0)
+          && Math.abs(previousTotal - item.agreedPayment) < 0.01;
+        if (!canSplit) return { ...item, agreedPayment, updatedAt: new Date().toISOString() };
+        const first = Math.round((agreedPayment / 2) * 100) / 100;
+        return {
+          ...item,
+          agreedPayment,
+          installments: [
+            { ...item.installments[0], amount: first },
+            { ...item.installments[1], amount: Math.max(0, Math.round((agreedPayment - first) * 100) / 100) },
+          ],
+          updatedAt: new Date().toISOString(),
+        };
+      }),
+    }));
+  const updateInstallment = (assignmentId: string, number: 1 | 2, patch: Partial<InvestigatorInstallment>) =>
+    setDraft((current) => ({
+      ...current,
+      investigatorHistory: current.investigatorHistory.map((assignment) => {
+        if (assignment.id !== assignmentId) return assignment;
+        const installments = assignment.installments.map((installment) => installment.number === number
+          ? { ...installment, ...patch }
+          : installment) as [InvestigatorInstallment, InvestigatorInstallment];
+        return { ...assignment, installments, updatedAt: new Date().toISOString() };
+      }),
+    }));
+  const addAssignment = () => setDraft((current) => ({
+    ...current,
+    investigatorHistory: [
+      ...current.investigatorHistory.map((item) => ({ ...item, isCurrent: false })),
+      blankInvestigatorAssignment(),
+    ],
+  }));
+  const markCurrentAssignment = (id: string) => setDraft((current) => ({
+    ...current,
+    investigatorHistory: current.investigatorHistory.map((item) => ({ ...item, isCurrent: item.id === id })),
+  }));
+  const removeAssignment = (id: string) => setDraft((current) => {
+    const remaining = current.investigatorHistory.filter((item) => item.id !== id);
+    if (remaining.length && !remaining.some((item) => item.isCurrent)) remaining[remaining.length - 1] = { ...remaining[remaining.length - 1], isCurrent: true };
+    return { ...current, investigatorHistory: remaining };
+  });
   const investigatorNames = useMemo(() => {
     const values = investigators.filter((item) => item.active).map((item) => item.name).filter(Boolean);
-    if (draft.investigator && !values.includes(draft.investigator)) values.push(draft.investigator);
+    [draft.investigator, ...draft.investigatorHistory.map((item) => item.investigator)].filter(Boolean).forEach((name) => {
+      if (!values.includes(name)) values.push(name);
+    });
     return values.sort((a, b) => a.localeCompare(b, "es"));
-  }, [investigators, draft.investigator]);
+  }, [investigators, draft.investigator, draft.investigatorHistory]);
 
   const submit = (event: FormEvent) => {
     event.preventDefault();
@@ -390,9 +450,6 @@ function RecordModal({
       [draft.indexation, "indexación"],
       [draft.contractStartDate, "fecha inicial del contrato"],
       [draft.contractEndDate, "fecha final del contrato"],
-      [draft.investigator, "investigador"],
-      [draft.investigatorStartDate, "fecha inicial del investigador"],
-      [draft.investigatorEndDate, "fecha final del investigador"],
     ];
     const missing = required.find(([value]) => !String(value).trim());
     if (missing) {
@@ -403,13 +460,48 @@ function RecordModal({
       setError("La fecha final del contrato no puede ser anterior a la fecha inicial.");
       return;
     }
-    if (draft.investigatorEndDate < draft.investigatorStartDate) {
-      setError("La fecha final del investigador no puede ser anterior a la fecha inicial.");
+    const assignments = draft.investigatorHistory.filter((item) => item.investigator.trim());
+    if (draft.status !== "Por asignar" && assignments.length === 0) {
+      setError("Agrega al menos un investigador o selecciona el estado editorial Por asignar.");
       return;
     }
+    const incompleteAssignment = assignments.find((item) => !item.startDate || !item.endDate);
+    if (incompleteAssignment) {
+      setError(`Completa las fechas de inicio y fin de ${incompleteAssignment.investigator}.`);
+      return;
+    }
+    const invalidAssignment = assignments.find((item) => item.endDate < item.startDate);
+    if (invalidAssignment) {
+      setError(`La fecha final de ${invalidAssignment.investigator} no puede ser anterior a la inicial.`);
+      return;
+    }
+    const invalidInstallments = assignments.find((item) => Math.abs(
+      item.installments.reduce((sum, installment) => sum + (Number(installment.amount) || 0), 0)
+      - (Number(item.agreedPayment) || 0),
+    ) > 0.01);
+    if (invalidInstallments) {
+      setError(`Los dos abonos de ${invalidInstallments.investigator} deben sumar exactamente el honorario acordado.`);
+      return;
+    }
+    const currentId = assignments.find((item) => item.isCurrent)?.id || assignments.at(-1)?.id;
+    const normalizedAssignments = assignments.map((item) => ({
+      ...item,
+      agreedPayment: Math.max(0, Number(item.agreedPayment) || 0),
+      isCurrent: item.id === currentId,
+      installments: item.installments.map((installment) => {
+        const amount = Math.max(0, Number(installment.amount) || 0);
+        const paidAmount = Math.max(0, Math.min(Number(installment.paidAmount) || 0, amount || Number(installment.paidAmount) || 0));
+        const status = paidAmount <= 0 ? "pendiente" : amount > 0 && paidAmount >= amount ? "pagado" : "parcial";
+        return { ...installment, amount, paidAmount, status };
+      }) as [InvestigatorInstallment, InvestigatorInstallment],
+      updatedAt: new Date().toISOString(),
+    }));
+    const currentAssignment = normalizedAssignments.find((item) => item.isCurrent) || normalizedAssignments.at(-1);
+    const previousAssignment = [...normalizedAssignments].reverse().find((item) => item.id !== currentAssignment?.id);
     const journalAccesses = draft.journalAccesses.filter((item) => [item.journal, item.journalLink, item.loginLink, item.username, item.password].some((value) => value.trim()));
     const driveFiles = draft.driveFiles.filter((item) => item.name.trim() || item.url.trim());
     const primary = journalAccesses[0];
+    const submitter = (event.nativeEvent as SubmitEvent).submitter as HTMLElement | null;
     onSave({
       ...draft,
       apcValue: draft.hasApc ? Math.max(0, Number(draft.apcValue) || 0) : 0,
@@ -420,11 +512,18 @@ function RecordModal({
       loginLink: primary?.loginLink || "",
       username: primary?.username || "",
       password: primary?.password || "",
+      investigatorHistory: normalizedAssignments,
+      investigator: currentAssignment?.investigator || "",
+      previousInvestigator: previousAssignment?.investigator || "",
+      investigatorStartDate: currentAssignment?.startDate || "",
+      investigatorEndDate: currentAssignment?.endDate || "",
+      investigatorPayment: currentAssignment?.agreedPayment || 0,
+      investigatorPaid: currentAssignment?.installments.reduce((sum, installment) => sum + installment.paidAmount, 0) || 0,
       startDate: draft.startDate || draft.contractStartDate,
       endDate: draft.endDate || draft.contractEndDate,
       progress: Math.min(100, Math.max(0, Number(draft.progress))),
       updatedAt: new Date().toISOString(),
-    });
+    }, submitter?.dataset.addContract === "true");
   };
 
   return (
@@ -457,7 +556,7 @@ function RecordModal({
               <label>Orden de producción<input value={draft.productionOrder} onChange={(event) => set("productionOrder", event.target.value)} /></label>
               <label className="span-3">Tema / título<textarea value={draft.topic} onChange={(event) => set("topic", event.target.value)} rows={3} /></label>
               <label>Producto *<select value={draft.product} onChange={(event) => set("product", event.target.value)} required><option value="">Seleccione…</option>{draft.product && !PRODUCT_OPTIONS.includes(draft.product) && <option value={draft.product}>{draft.product} (importado)</option>}{PRODUCT_OPTIONS.map((value) => <option key={value}>{value}</option>)}</select></label>
-              <label>Estado editorial<input value={draft.status} onChange={(event) => set("status", event.target.value)} /></label>
+              <label>Estado editorial *<select value={draft.status} onChange={(event) => set("status", event.target.value)} required>{draft.status && !EDITORIAL_STATUS_OPTIONS.includes(draft.status) && <option value={draft.status}>{draft.status} (importado)</option>}{EDITORIAL_STATUS_OPTIONS.map((value) => <option key={value}>{value}</option>)}</select></label>
               <label>Prioridad operativa<select value={draft.operationalStatus} onChange={(event) => set("operationalStatus", event.target.value as EditorialRecord["operationalStatus"])}>{OPERATIONAL_OPTIONS.map((value) => <option key={value}>{value}</option>)}</select></label>
               <label>Inicio del proceso<input type="date" value={draft.startDate} onChange={(event) => set("startDate", event.target.value)} /></label>
               <label>Fin del proceso<input type="date" value={draft.endDate} min={draft.startDate} onChange={(event) => set("endDate", event.target.value)} /></label>
@@ -466,14 +565,33 @@ function RecordModal({
           </section>
 
           <section className="record-section">
-            <div className="record-section-heading"><div><span>03</span><h3>Asignación del investigador</h3></div><p>El responsable se selecciona desde el catálogo de investigadores.</p></div>
-            <div className="form-grid three-cols">
-              <label>Investigador a cargo *<select value={draft.investigator} onChange={(event) => set("investigator", event.target.value)} required><option value="">Seleccione…</option>{investigatorNames.map((value) => <option key={value}>{value}</option>)}</select>{investigators.length === 0 && <small className="field-help">Registre primero al investigador en el módulo Investigadores.</small>}</label>
-              <label>Inicio de asignación *<input type="date" value={draft.investigatorStartDate} onChange={(event) => set("investigatorStartDate", event.target.value)} required /></label>
-              <label>Fin de asignación *<input type="date" value={draft.investigatorEndDate} min={draft.investigatorStartDate} onChange={(event) => set("investigatorEndDate", event.target.value)} required /></label>
-              <label>Investigador anterior<select value={draft.previousInvestigator} onChange={(event) => set("previousInvestigator", event.target.value)}><option value="">Ninguno</option>{draft.previousInvestigator && !investigatorNames.includes(draft.previousInvestigator) && <option>{draft.previousInvestigator}</option>}{investigatorNames.map((value) => <option key={value}>{value}</option>)}</select></label>
-              <label>Honorario (USD)<input type="number" min="0" step="0.01" value={draft.investigatorPayment} onChange={(event) => set("investigatorPayment", Number(event.target.value))} /></label>
-              <label>Pagado al investigador (USD)<input type="number" min="0" step="0.01" value={draft.investigatorPaid} onChange={(event) => set("investigatorPaid", Number(event.target.value))} /></label>
+            <div className="record-section-heading"><div><span>03</span><h3>Investigadores e historial del proceso</h3></div><p>Cada asignación conserva responsable, periodo y exactamente dos abonos.</p></div>
+            <div className="section-heading"><div><h3>Historial de asignaciones</h3><p>Al cambiar de responsable, agregue otra asignación; las anteriores no se reemplazan.</p></div><button type="button" className="button secondary small" onClick={addAssignment}><Plus size={15} /> Añadir investigador</button></div>
+            {investigators.length === 0 && <p className="field-help assignment-help">Registre primero al equipo desde el módulo Investigadores. Puede dejar el proceso en estado “Por asignar”.</p>}
+            <div className="assignment-history-editor">
+              {draft.investigatorHistory.length === 0 && <div className="empty-assignment"><UsersRound /><div><strong>Proceso sin investigador</strong><p>Use “Añadir investigador” o seleccione el estado editorial Por asignar.</p></div></div>}
+              {draft.investigatorHistory.map((assignment, assignmentIndex) => <article className={`assignment-card ${assignment.isCurrent ? "current" : ""}`} key={assignment.id}>
+                <header><div><span>Asignación {assignmentIndex + 1}</span><strong>{assignment.investigator || "Seleccione investigador"}</strong></div><div>{assignment.isCurrent ? <span className="current-assignment-pill">Responsable actual</span> : <button type="button" className="button secondary small" onClick={() => markCurrentAssignment(assignment.id)}>Marcar como actual</button>}<button type="button" className="icon-button danger" onClick={() => removeAssignment(assignment.id)} aria-label="Eliminar asignación"><Trash2 size={15} /></button></div></header>
+                <div className="form-grid three-cols assignment-main-fields">
+                  <label>Investigador *<select value={assignment.investigator} onChange={(event) => updateAssignment(assignment.id, { investigator: event.target.value })}><option value="">Seleccione…</option>{investigatorNames.map((value) => <option key={value}>{value}</option>)}</select></label>
+                  <label>Inicio de asignación *<input type="date" value={assignment.startDate} onChange={(event) => updateAssignment(assignment.id, { startDate: event.target.value })} /></label>
+                  <label>Fin de asignación *<input type="date" min={assignment.startDate} value={assignment.endDate} onChange={(event) => updateAssignment(assignment.id, { endDate: event.target.value })} /></label>
+                  <label>Honorario acordado (USD)<input type="number" min="0" step="0.01" value={assignment.agreedPayment} onChange={(event) => updateAssignmentPayment(assignment.id, Number(event.target.value))} /></label>
+                  <label className="span-2">Observación de la asignación<input value={assignment.notes} onChange={(event) => updateAssignment(assignment.id, { notes: event.target.value })} placeholder="Motivo de cambio, alcance u observación" /></label>
+                </div>
+                <div className="investigator-installments">
+                  {assignment.installments.map((installment) => <div className="installment-card" key={installment.number}>
+                    <div className="installment-title"><span>Abono {installment.number} de 2</span><strong>{formatCurrency(installment.paidAmount)} / {formatCurrency(installment.amount)}</strong></div>
+                    <div className="form-grid three-cols">
+                      <label>Valor previsto<input type="number" min="0" step="0.01" value={installment.amount} onChange={(event) => updateInstallment(assignment.id, installment.number, { amount: Number(event.target.value) })} /></label>
+                      <label>Valor pagado<input type="number" min="0" step="0.01" value={installment.paidAmount} onChange={(event) => { const paidAmount = Number(event.target.value); updateInstallment(assignment.id, installment.number, { paidAmount, status: paidAmount <= 0 ? "pendiente" : paidAmount >= installment.amount ? "pagado" : "parcial" }); }} /></label>
+                      <label>Estado<select value={installment.status} onChange={(event) => { const status = event.target.value as InvestigatorInstallment["status"]; updateInstallment(assignment.id, installment.number, { status, paidAmount: status === "pagado" ? installment.amount : status === "pendiente" ? 0 : installment.paidAmount, paidDate: status === "pagado" ? installment.paidDate || new Date().toISOString().slice(0, 10) : status === "pendiente" ? "" : installment.paidDate }); }}><option value="pendiente">Pendiente</option><option value="parcial">Parcial</option><option value="pagado">Pagado</option></select></label>
+                      <label>Fecha prevista<input type="date" value={installment.scheduledDate} onChange={(event) => updateInstallment(assignment.id, installment.number, { scheduledDate: event.target.value })} /></label>
+                      <label>Fecha pagada<input type="date" value={installment.paidDate} onChange={(event) => updateInstallment(assignment.id, installment.number, { paidDate: event.target.value })} /></label>
+                    </div>
+                  </div>)}
+                </div>
+              </article>)}
             </div>
           </section>
 
@@ -556,7 +674,7 @@ function RecordModal({
         </div>
         <footer className="modal-footer">
           {onDelete ? <button type="button" className="button danger ghost" onClick={() => onDelete(draft)}><Trash2 size={16} /> Eliminar</button> : <span />}
-          <div><button type="button" className="button secondary" onClick={onClose}>Cancelar</button><button className="button primary"><Save size={16} /> Guardar en Google Sheets</button></div>
+          <div className="record-save-actions"><button type="button" className="button secondary" onClick={onClose}>Cancelar</button><button type="submit" className="button secondary" data-add-contract="true"><Plus size={16} /> Guardar y añadir otro contrato</button><button type="submit" className="button primary"><Save size={16} /> Guardar en Google Sheets</button></div>
         </footer>
       </form>
     </div>
@@ -566,7 +684,7 @@ function RecordModal({
 function FiltersBar({ filters, setFilters, records }: { filters: Filters; setFilters: (filters: Filters) => void; records: EditorialRecord[] }) {
   const [open, setOpen] = useState(false);
   const statuses = useMemo(() => Array.from(new Set(records.map((record) => statusBucket(record.status)))).sort(), [records]);
-  const investigators = useMemo(() => Array.from(new Set(records.map((record) => record.investigator).filter(Boolean))).sort(), [records]);
+  const investigators = useMemo(() => Array.from(new Set(records.flatMap((record) => record.investigatorHistory.map((item) => item.investigator)).filter(Boolean))).sort(), [records]);
   const indexations = useMemo(() => Array.from(new Set(records.map((record) => record.indexation).filter(Boolean))).sort(), [records]);
   const active = Object.entries(filters).filter(([key, value]) => key !== "search" && value).length;
   return (
@@ -716,6 +834,54 @@ function PortfolioView({ records, onEdit }: { records: EditorialRecord[]; onEdit
   );
 }
 
+function ClientsView({ records, onEdit, onNewContract }: {
+  records: EditorialRecord[];
+  onEdit: (record: EditorialRecord) => void;
+  onNewContract: (record: EditorialRecord) => void;
+}) {
+  const [search, setSearch] = useState("");
+  const clients = useMemo(() => {
+    const grouped = new Map<string, EditorialRecord[]>();
+    records.forEach((record) => {
+      const key = normalizeText(record.client).toUpperCase() || record.id;
+      grouped.set(key, [...(grouped.get(key) || []), record]);
+    });
+    return [...grouped.values()].map((items) => {
+      const sorted = [...items].sort((a, b) => Date.parse(b.updatedAt || "") - Date.parse(a.updatedAt || ""));
+      const profile = sorted.find((item) => item.clientEmail || item.clientPhone || item.clientId || item.clientInstitution) || sorted[0];
+      return {
+        profile,
+        records: sorted,
+        total: sorted.reduce((sum, item) => sum + item.clientTotal, 0),
+        balance: sorted.reduce((sum, item) => sum + clientBalance(item), 0),
+        active: sorted.filter((item) => statusBucket(item.status) !== "Finalizado").length,
+      };
+    }).sort((a, b) => a.profile.client.localeCompare(b.profile.client, "es"));
+  }, [records]);
+  const query = normalizeText(search).toUpperCase();
+  const visible = clients.filter((client) => !query || normalizeText([
+    client.profile.client,
+    client.profile.clientId,
+    client.profile.clientEmail,
+    client.profile.clientPhone,
+    client.profile.clientInstitution,
+    ...client.records.map((record) => record.contractNumber),
+  ].join(" ")).toUpperCase().includes(query));
+
+  return <div className="view-stack">
+    <section className="clients-hero">
+      <div><span className="eyebrow">REGISTRO SEPARADO DE CLIENTES</span><h3>{clients.length} clientes · {records.length} contratos o procesos</h3><p>Cada cliente agrupa todos sus contratos y conserva una acción para registrar uno nuevo sin volver a escribir sus datos.</p></div>
+      <div className="table-search client-search"><Search size={17} /><input value={search} onChange={(event) => setSearch(event.target.value)} placeholder="Buscar cliente, documento o contrato…" />{search && <button onClick={() => setSearch("")}><X size={15} /></button>}</div>
+    </section>
+    {visible.length ? <div className="client-catalog-grid">{visible.map((client) => <article className="client-profile-card" key={normalizeText(client.profile.client).toUpperCase()}>
+      <header><div className="client-avatar">{client.profile.client.split(" ").slice(0, 2).map((part) => part[0]).join("")}</div><div><h3>{client.profile.client}</h3><p>{client.profile.clientInstitution || "Cliente particular"}</p><span>{client.profile.clientId || "Sin identificación"}</span></div><button className="button primary small" onClick={() => onNewContract(client.profile)}><Plus size={15} /> Nuevo contrato</button></header>
+      <div className="client-contact-grid"><span><b>Correo</b>{client.profile.clientEmail || "—"}</span><span><b>Teléfono</b>{client.profile.clientPhone || "—"}</span><span><b>Dirección</b>{client.profile.clientAddress || "—"}</span></div>
+      <div className="client-financial-summary"><div><span>Contratos</span><strong>{client.records.length}</strong></div><div><span>Activos</span><strong>{client.active}</strong></div><div><span>Valor total</span><strong>{formatCurrency(client.total)}</strong></div><div><span>Cartera</span><strong>{formatCurrency(client.balance)}</strong></div></div>
+      <div className="client-contract-list"><strong>Contratos y procesos</strong>{client.records.map((record) => <button key={record.id} onClick={() => onEdit(record)}><span><b>{record.contractNumber || "Sin número"}</b><small>{record.topic || record.product || "Sin tema"}</small></span><span><b>{statusBucket(record.status)}</b><small>{formatDate(record.contractStartDate)} — {formatDate(record.contractEndDate)}</small></span><ProgressBar value={record.progress} compact /></button>)}</div>
+    </article>)}</div> : <EmptyState title="No hay clientes coincidentes" text="Registre un proceso o cambie el texto de búsqueda." />}
+  </div>;
+}
+
 function InvestigatorsView({ records, investigators, onSaveCatalog, onEdit, notify }: {
   records: EditorialRecord[];
   investigators: Investigator[];
@@ -726,25 +892,28 @@ function InvestigatorsView({ records, investigators, onSaveCatalog, onEdit, noti
   const [draft, setDraft] = useState<Investigator | null>(null);
   const [busy, setBusy] = useState(false);
   const team = useMemo(() => {
-    const assignments = new Map<string, EditorialRecord[]>();
+    const assignments = new Map<string, { record: EditorialRecord; assignment: InvestigatorAssignment }[]>();
     records.forEach((record) => {
-      const name = record.investigator || "Sin asignar";
-      assignments.set(name, [...(assignments.get(name) || []), record]);
+      record.investigatorHistory.forEach((assignment) => {
+        const name = assignment.investigator || "Sin asignar";
+        assignments.set(name, [...(assignments.get(name) || []), { record, assignment }]);
+      });
     });
     const names = new Set([...investigators.map((item) => item.name), ...assignments.keys()]);
     return [...names].map((name) => {
       const profile = investigators.find((item) => item.name === name);
       const own = assignments.get(name) || [];
+      const ownRecords = [...new Map(own.map((item) => [item.record.id, item.record])).values()];
       return {
         profile,
         name,
         records: own,
-        count: own.length,
-        activeProcesses: own.filter((item) => item.progress < 100).length,
-        avg: own.length ? Math.round(own.reduce((sum, item) => sum + item.progress, 0) / own.length) : 0,
-        portfolio: own.reduce((sum, item) => sum + clientBalance(item), 0),
-        fee: own.reduce((sum, item) => sum + item.investigatorPayment, 0),
-        paid: own.reduce((sum, item) => sum + item.investigatorPaid, 0),
+        count: ownRecords.length,
+        activeProcesses: own.filter((item) => item.assignment.isCurrent && item.record.progress < 100).length,
+        avg: ownRecords.length ? Math.round(ownRecords.reduce((sum, item) => sum + item.progress, 0) / ownRecords.length) : 0,
+        portfolio: ownRecords.reduce((sum, item) => sum + clientBalance(item), 0),
+        fee: own.reduce((sum, item) => sum + item.assignment.agreedPayment, 0),
+        paid: own.reduce((sum, item) => sum + item.assignment.installments.reduce((paid, installment) => paid + installment.paidAmount, 0), 0),
       };
     }).sort((a, b) => b.count - a.count || a.name.localeCompare(b.name, "es"));
   }, [records, investigators]);
@@ -810,7 +979,7 @@ function InvestigatorsView({ records, investigators, onSaveCatalog, onEdit, noti
         <ProgressBar value={person.avg} />
         <div className="team-stats"><div><span>Cartera asociada</span><strong>{formatCurrency(person.portfolio)}</strong></div><div><span>Honorario</span><strong>{formatCurrency(person.fee)}</strong></div><div><span>Pendiente por pagar</span><strong>{formatCurrency(Math.max(0, person.fee - person.paid))}</strong></div></div>
         {person.profile?.driveFolderUrl && <a className="link-button" href={person.profile.driveFolderUrl} target="_blank" rel="noreferrer"><Link2 size={15} /> Abrir carpeta de Drive</a>}
-        <div className="investigator-processes"><strong>Procesos asignados</strong>{person.records.length ? person.records.map((record) => <button key={record.id} onClick={() => onEdit(record)}><span><b>{record.client}</b><small>{record.topic || record.product}</small></span><span><b>{record.operationalStatus}</b><small>{formatDate(record.investigatorStartDate)} — {formatDate(record.investigatorEndDate)}</small></span><ProgressBar value={record.progress} compact /></button>) : <p>Sin procesos asignados.</p>}</div>
+        <div className="investigator-processes"><strong>Historial de procesos asignados</strong>{person.records.length ? person.records.map(({ record, assignment }) => <button key={assignment.id} onClick={() => onEdit(record)}><span><b>{record.client}</b><small>{record.contractNumber || record.topic || record.product}</small></span><span><b>{assignment.isCurrent ? "Responsable actual" : "Asignación histórica"}</b><small>{formatDate(assignment.startDate)} — {formatDate(assignment.endDate)}</small></span><span className="assignment-payment-summary"><b>{formatCurrency(assignment.installments.reduce((sum, installment) => sum + installment.paidAmount, 0))}</b><small>de {formatCurrency(assignment.agreedPayment)}</small></span><ProgressBar value={record.progress} compact /></button>) : <p>Sin procesos asignados.</p>}</div>
       </article>)}</div> : <EmptyState title="Sin investigadores" text="Registre al equipo y asígnelo a los procesos." />}
     </section>
   </div>;
@@ -900,7 +1069,7 @@ function GoogleSheetsView({
     setTestResult("");
     try {
       const result = await testGoogleSheetsConnection(draft);
-      setTestResult(`${result.records} procesos · ${result.payments} pagos · revisión ${result.revision}`);
+      setTestResult(`${result.clients} clientes · ${result.records} procesos · ${result.assignments} asignaciones · revisión ${result.revision}`);
       notify("Conexión con Google Sheets verificada.");
     } catch (error) {
       notify(error instanceof Error ? error.message : "No se pudo conectar con Google Sheets.", "danger");
@@ -950,7 +1119,7 @@ function GoogleSheetsView({
           </div>
           <div className="sync-explainer">
             <h4>¿Qué se almacena?</h4>
-            <p>Procesos, clientes, contratos, fechas, cartera, pagos, investigadores, revistas, avance, observaciones e historial. Los pagos se guardan además en una hoja separada para facilitar filtros y reportes.</p>
+            <p>Clientes, contratos, procesos, cartera, pagos, catálogo de investigadores e historial completo de asignaciones. Google Sheets separa Clientes, Investigadores e HistorialInvestigadores para facilitar el control.</p>
             <h4>Conciliación segura</h4>
             <p>Antes de subir, el sistema descarga la revisión vigente, combina cambios por ID y fecha de actualización, conserva eliminaciones y evita sobrescribir una edición simultánea.</p>
           </div>
@@ -1003,12 +1172,23 @@ function DataView({
   );
 }
 
+const newContractForClient = (source: EditorialRecord): EditorialRecord => ({
+  ...blankRecord(),
+  client: source.client,
+  clientId: source.clientId,
+  clientEmail: source.clientEmail,
+  clientPhone: source.clientPhone,
+  clientAddress: source.clientAddress,
+  clientInstitution: source.clientInstitution,
+  sources: ["Nuevo contrato de cliente existente"],
+});
+
 export default function EditorialApp() {
   const [data, setData] = useState<AppData | null>(null);
   const [view, setView] = useState<ViewKey>("dashboard");
   const [filters, setFilters] = useState<Filters>(EMPTY_FILTERS);
   const [editing, setEditing] = useState<EditorialRecord | null>(null);
-  const [newRecord, setNewRecord] = useState(false);
+  const [newRecord, setNewRecord] = useState<EditorialRecord | null>(null);
   const [mobileMenu, setMobileMenu] = useState(false);
   const [toast, setToast] = useState<{ message: string; tone: "success" | "danger" } | null>(null);
   const [savedAt, setSavedAt] = useState("");
@@ -1094,10 +1274,10 @@ export default function EditorialApp() {
     if (!data) return [];
     const query = normalizeText(filters.search).toUpperCase();
     return data.records.filter((record) => {
-      const haystack = normalizeText([record.client, record.topic, record.product, record.contractNumber, record.journal, record.investigator, record.status, record.operationalStatus, record.indexation, record.clientEmail, record.clientInstitution].join(" ")).toUpperCase();
+      const haystack = normalizeText([record.client, record.topic, record.product, record.contractNumber, record.journal, record.investigator, ...record.investigatorHistory.map((item) => item.investigator), record.status, record.operationalStatus, record.indexation, record.clientEmail, record.clientInstitution].join(" ")).toUpperCase();
       if (query && !haystack.includes(query)) return false;
       if (filters.status && statusBucket(record.status) !== filters.status) return false;
-      if (filters.investigator && record.investigator !== filters.investigator) return false;
+      if (filters.investigator && !record.investigatorHistory.some((item) => item.investigator === filters.investigator)) return false;
       if (filters.indexation && record.indexation !== filters.indexation) return false;
       if (filters.risk && paymentRisk(record) !== filters.risk) return false;
       if (filters.operationalStatus && record.operationalStatus !== filters.operationalStatus) return false;
@@ -1111,12 +1291,14 @@ export default function EditorialApp() {
 
   if (!data) return <CloudAuthScreen onReady={ready} />;
 
-  const saveRecord = async (record: EditorialRecord) => {
+  const saveRecord = async (record: EditorialRecord, addAnotherContract = false) => {
     const exists = data.records.some((item) => item.id === record.id);
     const records = exists ? data.records.map((item) => item.id === record.id ? record : item) : [record, ...data.records];
     try {
       await persist(addAudit({ ...data, records, deletedRecords: (data.deletedRecords || []).filter((item) => item.id !== record.id) }, exists ? "Edición" : "Creación", `${record.client} · ${record.contractNumber || "sin contrato"}`));
-      setEditing(null); setNewRecord(false); notify("Registro guardado en Google Sheets.");
+      setEditing(null);
+      setNewRecord(addAnotherContract ? newContractForClient(record) : null);
+      notify(addAnotherContract ? "Registro guardado. Complete el nuevo contrato del mismo cliente." : "Registro guardado en Google Sheets.");
     } catch (error) {
       notify(error instanceof Error ? error.message : "No se pudo guardar el registro.", "danger");
     }
@@ -1136,10 +1318,10 @@ export default function EditorialApp() {
     }
   };
   const saveGoogleConfig = async (config: GoogleSheetsConfig) => {
-    await persist(addAudit({ ...data, googleSheets: config, version: 4 }, "Google Sheets", "Configuración de sincronización actualizada"));
+    await persist(addAudit({ ...data, googleSheets: config, version: 5 }, "Google Sheets", "Configuración de sincronización actualizada"));
   };
   const saveInvestigators = async (investigators: Investigator[]) => {
-    await persist(addAudit({ ...data, investigators, version: 4 }, "Investigadores", `Catálogo actualizado: ${investigators.length} registros`));
+    await persist(addAudit({ ...data, investigators, version: 5 }, "Investigadores", `Catálogo actualizado: ${investigators.length} registros`));
   };
   const title = NAV_ITEMS.find((item) => item.key === view)?.label || "Control editorial";
 
@@ -1155,10 +1337,11 @@ export default function EditorialApp() {
         <header className="topbar">
           <button className="menu-button" onClick={() => setMobileMenu(true)}><Menu /></button>
           <div><span className="eyebrow">CENTRO DE INVESTIGACIÓN</span><h1>{title}</h1></div>
-          <div className="top-actions"><button className="icon-button notification" onClick={() => setView("alerts")}><Bell /><i /></button><button className="button primary" onClick={() => setNewRecord(true)}><Plus size={17} /> Nuevo proceso</button></div>
+          <div className="top-actions"><button className="icon-button notification" onClick={() => setView("alerts")}><Bell /><i /></button><button className="button primary" onClick={() => setNewRecord(blankRecord())}><Plus size={17} /> Nuevo proceso</button></div>
         </header>
         <div className="content">
           {view === "dashboard" && <Dashboard records={data.records} onEdit={setEditing} onNavigate={setView} />}
+          {view === "clients" && <ClientsView records={data.records} onEdit={setEditing} onNewContract={(record) => setNewRecord(newContractForClient(record))} />}
           {view === "processes" && <><FiltersBar filters={filters} setFilters={setFilters} records={data.records} /><ProcessesTable records={filtered} onEdit={setEditing} /></>}
           {view === "portfolio" && <PortfolioView records={data.records} onEdit={setEditing} />}
           {view === "investigators" && <InvestigatorsView records={data.records} investigators={data.investigators} onSaveCatalog={saveInvestigators} onEdit={setEditing} notify={notify} />}
@@ -1168,7 +1351,7 @@ export default function EditorialApp() {
           {view === "data" && <DataView data={data} onData={persist} notify={notify} />}
         </div>
       </main>
-      {(editing || newRecord) && <RecordModal source={editing || blankRecord()} investigators={data.investigators} credentialsEnabled={Boolean(data.googleSheets?.includeCredentials)} onClose={() => { setEditing(null); setNewRecord(false); }} onSave={saveRecord} onDelete={editing ? deleteRecord : undefined} />}
+      {(editing || newRecord) && <RecordModal source={editing || newRecord || blankRecord()} investigators={data.investigators} credentialsEnabled={Boolean(data.googleSheets?.includeCredentials)} onClose={() => { setEditing(null); setNewRecord(null); }} onSave={saveRecord} onDelete={editing ? deleteRecord : undefined} />}
       {toast && <div className={`toast ${toast.tone}`}><span>{toast.tone === "success" ? <Check /> : <AlertCircle />}</span>{toast.message}</div>}
     </div>
   );

@@ -33,6 +33,30 @@ export interface Investigator {
   updatedAt: string;
 }
 
+export type InvestigatorInstallmentStatus = "pendiente" | "parcial" | "pagado";
+
+export interface InvestigatorInstallment {
+  number: 1 | 2;
+  amount: number;
+  paidAmount: number;
+  scheduledDate: string;
+  paidDate: string;
+  status: InvestigatorInstallmentStatus;
+}
+
+export interface InvestigatorAssignment {
+  id: string;
+  investigator: string;
+  startDate: string;
+  endDate: string;
+  agreedPayment: number;
+  installments: [InvestigatorInstallment, InvestigatorInstallment];
+  notes: string;
+  isCurrent: boolean;
+  createdAt: string;
+  updatedAt: string;
+}
+
 export interface ClientPayment {
   id: string;
   concept: string;
@@ -74,6 +98,7 @@ export interface EditorialRecord {
   nextPaymentAmount: number;
   investigatorPayment: number;
   investigatorPaid: number;
+  investigatorHistory: InvestigatorAssignment[];
   investigatorInvoiceNumber: string;
   investigatorInvoiceDate: string;
   investigatorInvoiceValue: number;
@@ -118,7 +143,7 @@ export interface GoogleSheetsConfig {
 }
 
 export interface AppData {
-  version: 2 | 3 | 4;
+  version: 2 | 3 | 4 | 5;
   records: EditorialRecord[];
   investigators: Investigator[];
   auditLog: AuditEntry[];
@@ -129,6 +154,7 @@ export interface AppData {
 
 export type ViewKey =
   | "dashboard"
+  | "clients"
   | "processes"
   | "portfolio"
   | "investigators"

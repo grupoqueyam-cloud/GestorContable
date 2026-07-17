@@ -130,6 +130,10 @@ export const mergeRecordSets = (
       )) === index);
     merged.driveFiles = [...previous.driveFiles, ...record.driveFiles]
       .filter((item, index, array) => array.findIndex((candidate) => candidate.id === item.id || candidate.url === item.url) === index);
+    merged.investigatorHistory = [...previous.investigatorHistory, ...record.investigatorHistory]
+      .filter((item, index, array) => array.findIndex((candidate) => candidate.id === item.id || (
+        candidate.investigator === item.investigator && candidate.startDate === item.startDate && candidate.endDate === item.endDate
+      )) === index);
     merged.clientPayments = uniquePayments([
       ...previous.clientPayments,
       ...record.clientPayments,
@@ -387,7 +391,7 @@ export const importExcelFiles = async (
 };
 
 export const makeEmptyData = (): AppData => ({
-  version: 4,
+  version: 5,
   records: [],
   investigators: [],
   auditLog: [],
@@ -445,6 +449,7 @@ export const exportWorkbook = async (records: EditorialRecord[], investigators: 
     "Institución cliente",
     "Revistas y accesos JSON",
     "Archivos Drive JSON",
+    "Historial investigadores JSON",
     "Observaciones",
   ];
   processes.addRow(headers);
@@ -493,6 +498,7 @@ export const exportWorkbook = async (records: EditorialRecord[], investigators: 
       record.clientInstitution,
       JSON.stringify(record.journalAccesses),
       JSON.stringify(record.driveFiles),
+      JSON.stringify(record.investigatorHistory),
       record.observations,
     ]);
   });
@@ -525,6 +531,60 @@ export const exportWorkbook = async (records: EditorialRecord[], investigators: 
   payments.views = [{ state: "frozen", ySplit: 1 }];
   payments.columns = [26, 22, 22, 18, 18, 16, 16, 40].map((width) => ({ width }));
 
+  const clients = workbook.addWorksheet("Clientes");
+  clients.addRow(["Cliente", "Documento", "Correo", "Teléfono", "Dirección", "Institución", "Contratos", "Contratos activos", "Valor total", "Cartera", "Números de contrato"]);
+  const clientGroups = new Map<string, EditorialRecord[]>();
+  records.forEach((record) => {
+    const key = normalizeText(record.client).toUpperCase() || record.id;
+    clientGroups.set(key, [...(clientGroups.get(key) || []), record]);
+  });
+  [...clientGroups.values()].sort((a, b) => a[0].client.localeCompare(b[0].client, "es")).forEach((items) => {
+    const profile = items.find((item) => item.clientEmail || item.clientPhone || item.clientId || item.clientInstitution) || items[0];
+    clients.addRow([
+      profile.client,
+      profile.clientId,
+      profile.clientEmail,
+      profile.clientPhone,
+      profile.clientAddress,
+      profile.clientInstitution,
+      items.length,
+      items.filter((item) => item.status !== "Finalizado").length,
+      items.reduce((sum, item) => sum + item.clientTotal, 0),
+      items.reduce((sum, item) => sum + Math.max(0, item.outstandingBalance), 0),
+      items.map((item) => item.contractNumber).filter(Boolean).join(" · "),
+    ]);
+  });
+  clients.getRow(1).font = { bold: true, color: { argb: "FFFFFFFF" } };
+  clients.getRow(1).fill = { type: "pattern", pattern: "solid", fgColor: { argb: "FF173F3A" } };
+  clients.views = [{ state: "frozen", ySplit: 1 }];
+  clients.autoFilter = `A1:K${Math.max(1, clientGroups.size + 1)}`;
+  clients.columns = [28, 20, 28, 18, 32, 26, 14, 16, 16, 16, 38].map((width) => ({ width }));
+
+  const assignmentHistory = workbook.addWorksheet("Historial investigadores");
+  assignmentHistory.addRow([
+    "ID asignación", "ID proceso", "Cliente", "Contrato", "Investigador", "Responsable actual",
+    "Inicio", "Fin", "Honorario", "Abono 1 previsto", "Abono 1 pagado", "Fecha prevista 1",
+    "Fecha pagada 1", "Estado 1", "Abono 2 previsto", "Abono 2 pagado", "Fecha prevista 2",
+    "Fecha pagada 2", "Estado 2", "Total pagado", "Pendiente", "Notas",
+  ]);
+  records.forEach((record) => record.investigatorHistory.forEach((assignment) => {
+    const first = assignment.installments[0];
+    const second = assignment.installments[1];
+    const paid = first.paidAmount + second.paidAmount;
+    assignmentHistory.addRow([
+      assignment.id, record.id, record.client, record.contractNumber, assignment.investigator,
+      assignment.isCurrent ? "Sí" : "No", assignment.startDate, assignment.endDate, assignment.agreedPayment,
+      first.amount, first.paidAmount, first.scheduledDate, first.paidDate, first.status,
+      second.amount, second.paidAmount, second.scheduledDate, second.paidDate, second.status,
+      paid, Math.max(0, assignment.agreedPayment - paid), assignment.notes,
+    ]);
+  }));
+  assignmentHistory.getRow(1).font = { bold: true, color: { argb: "FFFFFFFF" } };
+  assignmentHistory.getRow(1).fill = { type: "pattern", pattern: "solid", fgColor: { argb: "FF536E8A" } };
+  assignmentHistory.views = [{ state: "frozen", ySplit: 1 }];
+  assignmentHistory.autoFilter = `A1:V${Math.max(1, assignmentHistory.rowCount)}`;
+  assignmentHistory.columns = [20, 18, 26, 20, 26, 16, 16, 16, 16, 18, 18, 18, 18, 14, 18, 18, 18, 18, 14, 16, 16, 36].map((width) => ({ width }));
+
   const team = workbook.addWorksheet("Investigadores");
   team.addRow([
     "Nombre", "Documento", "Correo", "Teléfono", "Especialidad", "Fecha de ingreso",
@@ -532,9 +592,12 @@ export const exportWorkbook = async (records: EditorialRecord[], investigators: 
     "Honorarios", "Pagado", "Pendiente", "Notas",
   ]);
   investigators.forEach((investigator) => {
-    const assigned = records.filter((record) => record.investigator === investigator.name);
-    const fees = assigned.reduce((sum, record) => sum + record.investigatorPayment, 0);
-    const paid = assigned.reduce((sum, record) => sum + record.investigatorPaid, 0);
+    const assignments = records.flatMap((record) => record.investigatorHistory
+      .filter((assignment) => assignment.investigator === investigator.name)
+      .map((assignment) => ({ record, assignment })));
+    const assigned = [...new Map(assignments.map((item) => [item.record.id, item.record])).values()];
+    const fees = assignments.reduce((sum, item) => sum + item.assignment.agreedPayment, 0);
+    const paid = assignments.reduce((sum, item) => sum + item.assignment.installments.reduce((subtotal, installment) => subtotal + installment.paidAmount, 0), 0);
     team.addRow([
       investigator.name,
       investigator.documentId,
@@ -546,7 +609,7 @@ export const exportWorkbook = async (records: EditorialRecord[], investigators: 
       investigator.driveFolderUrl,
       investigator.active ? "Activo" : "Inactivo",
       assigned.length,
-      assigned.filter((record) => record.progress < 100).length,
+      assignments.filter((item) => item.assignment.isCurrent && item.record.progress < 100).length,
       fees,
       paid,
       Math.max(0, fees - paid),

@@ -1,4 +1,12 @@
-import type { ClientPayment, DriveFile, EditorialRecord, Investigator, JournalAccess } from "./types";
+import type {
+  ClientPayment,
+  DriveFile,
+  EditorialRecord,
+  Investigator,
+  InvestigatorAssignment,
+  InvestigatorInstallment,
+  JournalAccess,
+} from "./types";
 
 export const normalizeText = (value: unknown) =>
   String(value ?? "")
@@ -130,6 +138,31 @@ export const blankInvestigator = (): Investigator => {
   };
 };
 
+export const blankInvestigatorInstallment = (number: 1 | 2, amount = 0): InvestigatorInstallment => ({
+  number,
+  amount,
+  paidAmount: 0,
+  scheduledDate: "",
+  paidDate: "",
+  status: "pendiente",
+});
+
+export const blankInvestigatorAssignment = (investigator = ""): InvestigatorAssignment => {
+  const now = new Date().toISOString();
+  return {
+    id: uid(),
+    investigator,
+    startDate: "",
+    endDate: "",
+    agreedPayment: 0,
+    installments: [blankInvestigatorInstallment(1), blankInvestigatorInstallment(2)],
+    notes: "",
+    isCurrent: true,
+    createdAt: now,
+    updatedAt: now,
+  };
+};
+
 export const blankRecord = (): EditorialRecord => {
   const now = new Date().toISOString();
   return {
@@ -138,7 +171,7 @@ export const blankRecord = (): EditorialRecord => {
     topic: "",
     product: "",
     indexation: "",
-    status: "Pendiente",
+    status: "Por asignar",
     operationalStatus: "Normal",
     progress: 0,
     username: "",
@@ -163,6 +196,7 @@ export const blankRecord = (): EditorialRecord => {
     nextPaymentAmount: 0,
     investigatorPayment: 0,
     investigatorPaid: 0,
+    investigatorHistory: [],
     investigatorInvoiceNumber: "",
     investigatorInvoiceDate: "",
     investigatorInvoiceValue: 0,

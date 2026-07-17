@@ -12,7 +12,7 @@
  */
 
 const APP_NAME = "Control Editorial Sustainability";
-const SCHEMA_VERSION = 2;
+const SCHEMA_VERSION = 3;
 const PROP_SECRET = "SYNC_SECRET";
 const PROP_REVISION = "DATA_REVISION";
 const PROP_FINGERPRINT = "DATA_FINGERPRINT";
@@ -24,6 +24,8 @@ const SHEETS = {
   deleted: "Eliminados",
   config: "Configuracion",
   investigators: "Investigadores",
+  clients: "Clientes",
+  investigatorHistory: "HistorialInvestigadores",
 };
 
 const RECORD_HEADERS = [
@@ -37,7 +39,7 @@ const RECORD_HEADERS = [
   "Fecha inicio investigador", "Fecha fin investigador", "Tiene APC", "Telefono cliente",
   "Direccion cliente", "Institucion cliente", "Factura investigador numero",
   "Factura investigador fecha", "Factura investigador valor", "Factura investigador link",
-  "Factura investigador estado", "Revistas JSON", "Drive JSON",
+  "Factura investigador estado", "Revistas JSON", "Drive JSON", "Historial investigadores JSON",
 ];
 
 const PAYMENT_HEADERS = [
@@ -51,6 +53,17 @@ const CONFIG_HEADERS = ["Clave", "Valor"];
 const INVESTIGATOR_HEADERS = [
   "ID", "Nombre", "Documento", "Email", "Telefono", "Especialidad", "Fecha ingreso",
   "Fecha salida", "Carpeta Drive", "Notas", "Activo", "Creado", "Actualizado",
+];
+const CLIENT_HEADERS = [
+  "ID cliente", "Cliente", "Documento", "Email", "Telefono", "Direccion", "Institucion",
+  "Numero contratos", "Contratos activos", "Valor total", "Cartera", "Contratos JSON", "Actualizado",
+];
+const INVESTIGATOR_HISTORY_HEADERS = [
+  "ID asignacion", "ID proceso", "Cliente", "Numero contrato", "Investigador", "Responsable actual",
+  "Fecha inicio", "Fecha fin", "Honorario", "Abono 1 previsto", "Abono 1 pagado",
+  "Abono 1 fecha prevista", "Abono 1 fecha pagada", "Abono 1 estado", "Abono 2 previsto",
+  "Abono 2 pagado", "Abono 2 fecha prevista", "Abono 2 fecha pagada", "Abono 2 estado",
+  "Total pagado", "Pendiente", "Notas", "Creado", "Actualizado",
 ];
 
 function doGet() {
@@ -83,7 +96,7 @@ function doPost(e) {
 
 function configurarHojas() {
   ensureSheets();
-  migrarDatosV2();
+  migrarDatosV3();
   applyDropdownValidations();
   const properties = PropertiesService.getScriptProperties();
   if (properties.getProperty(PROP_REVISION) === null) properties.setProperty(PROP_REVISION, "0");
@@ -99,7 +112,7 @@ function onOpen() {
   SpreadsheetApp.getUi()
     .createMenu("Control Editorial")
     .addItem("Configurar hojas", "configurarHojas")
-    .addItem("Migrar datos a versión 2", "migrarDatosV2")
+    .addItem("Migrar datos a versión 3", "migrarDatosV3")
     .addItem("Ver estado", "mostrarEstado")
     .addToUi();
 }
@@ -108,7 +121,7 @@ function mostrarEstado() {
   const counts = getCounts();
   SpreadsheetApp.getUi().alert(
     APP_NAME,
-    `Revision: ${getRevision()}\nProcesos: ${counts.records}\nPagos: ${counts.payments}\nEsquema: ${SCHEMA_VERSION}`,
+    `Revision: ${getRevision()}\nClientes: ${counts.clients}\nProcesos: ${counts.records}\nInvestigadores: ${counts.investigators}\nAsignaciones: ${counts.assignments}\nEsquema: ${SCHEMA_VERSION}`,
     SpreadsheetApp.getUi().ButtonSet.OK,
   );
 }
@@ -202,6 +215,8 @@ function ensureSheets() {
   prepareSheet(spreadsheet, SHEETS.deleted, DELETED_HEADERS, "#9a5b52");
   prepareSheet(spreadsheet, SHEETS.config, CONFIG_HEADERS, "#6c766f");
   prepareSheet(spreadsheet, SHEETS.investigators, INVESTIGATOR_HEADERS, "#2f6f64");
+  prepareSheet(spreadsheet, SHEETS.clients, CLIENT_HEADERS, "#17463f");
+  prepareSheet(spreadsheet, SHEETS.investigatorHistory, INVESTIGATOR_HISTORY_HEADERS, "#536e8a");
 }
 
 function applyDropdownValidations() {
@@ -209,6 +224,7 @@ function applyDropdownValidations() {
   if (!sheet || sheet.getMaxRows() < 2) return;
   const rows = sheet.getMaxRows() - 1;
   const lists = {
+    Estado: ["Pendiente", "Finalizado", "Elaboración", "Espera del cliente", "Por asignar"],
     Producto: ["Latindex", "Scielo", "Scopus", "WoS"],
     Indexacion: ["Latindex", "Scielo", "Q4", "Q3", "Q2", "Q1"],
     "Prioridad operativa": ["Normal", "Urgente", "Estancado", "Espera del cliente"],
@@ -218,7 +234,7 @@ function applyDropdownValidations() {
   Object.keys(lists).forEach((header) => {
     const column = RECORD_HEADERS.indexOf(header) + 1;
     if (column <= 0) return;
-    const rule = SpreadsheetApp.newDataValidation().requireValueInList(lists[header], true).setAllowInvalid(false).build();
+    const rule = SpreadsheetApp.newDataValidation().requireValueInList(lists[header], true).setAllowInvalid(header === "Estado").build();
     sheet.getRange(2, column, rows, 1).setDataValidation(rule);
   });
   const investigators = activeSpreadsheet().getSheetByName(SHEETS.investigators);
@@ -278,6 +294,70 @@ function migrarDatosV2() {
   applyDropdownValidations();
 }
 
+function migrarDatosV3() {
+  migrarDatosV2();
+  const records = readRecords();
+  records.forEach((record) => {
+    if ((!Array.isArray(record.investigatorHistory) || !record.investigatorHistory.length) && (record.investigator || record.previousInvestigator)) {
+      record.investigatorHistory = legacyInvestigatorAssignments(record);
+    }
+  });
+  writeRecords(records);
+  writeClients(records);
+  writeInvestigatorHistory(records);
+  PropertiesService.getScriptProperties().deleteProperty(PROP_FINGERPRINT);
+  setRevision(getRevision() + 1);
+  applyDropdownValidations();
+}
+
+function legacyInvestigatorAssignments(record) {
+  const currentInvestigator = text(record.investigator);
+  const previousInvestigator = text(record.previousInvestigator);
+  const fee = Math.max(numberValue(record.investigatorPayment), numberValue(record.investigatorPaid));
+  const paid = Math.max(0, numberValue(record.investigatorPaid));
+  const firstAmount = Math.round((fee / 2) * 100) / 100;
+  const secondAmount = Math.max(0, Math.round((fee - firstAmount) * 100) / 100);
+  const firstPaid = Math.min(paid, firstAmount || paid);
+  const secondPaid = Math.max(0, Math.min(paid - firstPaid, secondAmount));
+  const status = (paidAmount, amount) => amount > 0 && paidAmount >= amount ? "pagado" : paidAmount > 0 ? "parcial" : "pendiente";
+  const now = record.updatedAt || new Date().toISOString();
+  const history = [];
+  if (previousInvestigator && previousInvestigator.toUpperCase() !== currentInvestigator.toUpperCase()) {
+    history.push({
+      id: `${record.id || Utilities.getUuid()}-assignment-previous`,
+      investigator: previousInvestigator,
+      startDate: record.contractStartDate || record.startDate || "",
+      endDate: record.investigatorStartDate || record.endDate || record.contractEndDate || "",
+      agreedPayment: 0,
+      installments: [
+        { number: 1, amount: 0, paidAmount: 0, scheduledDate: "", paidDate: "", status: "pendiente" },
+        { number: 2, amount: 0, paidAmount: 0, scheduledDate: "", paidDate: "", status: "pendiente" },
+      ],
+      notes: "Migrado como investigador anterior; revise fechas y honorarios",
+      isCurrent: false,
+      createdAt: record.createdAt || now,
+      updatedAt: now,
+    });
+  }
+  if (!currentInvestigator) return history;
+  history.push({
+    id: `${record.id || Utilities.getUuid()}-assignment-1`,
+    investigator: currentInvestigator,
+    startDate: record.investigatorStartDate || record.startDate || "",
+    endDate: record.investigatorEndDate || record.endDate || "",
+    agreedPayment: fee,
+    installments: [
+      { number: 1, amount: firstAmount, paidAmount: firstPaid, scheduledDate: "", paidDate: "", status: status(firstPaid, firstAmount) },
+      { number: 2, amount: secondAmount, paidAmount: secondPaid, scheduledDate: "", paidDate: "", status: status(secondPaid, secondAmount) },
+    ],
+    notes: "Migrado desde el registro anterior",
+    isCurrent: true,
+    createdAt: record.createdAt || now,
+    updatedAt: now,
+  });
+  return history;
+}
+
 function prepareSheet(spreadsheet, name, headers, color) {
   let sheet = spreadsheet.getSheetByName(name);
   if (!sheet) sheet = spreadsheet.insertSheet(name);
@@ -308,6 +388,8 @@ function handlePing() {
     recordCount: counts.records,
     paymentCount: counts.payments,
     investigatorCount: counts.investigators,
+    clientCount: counts.clients,
+    assignmentCount: counts.assignments,
   };
 }
 
@@ -394,6 +476,8 @@ function handleSync(body) {
     writeRecords(records);
     writePayments(records);
     writeInvestigators(investigators);
+    writeClients(records);
+    writeInvestigatorHistory(records);
     applyDropdownValidations();
     writeAudit(audit.slice(0, 500));
     writeDeleted(deleted);
@@ -435,6 +519,8 @@ function getCounts() {
     records: Math.max(0, spreadsheet.getSheetByName(SHEETS.records).getLastRow() - 1),
     payments: Math.max(0, spreadsheet.getSheetByName(SHEETS.payments).getLastRow() - 1),
     investigators: Math.max(0, spreadsheet.getSheetByName(SHEETS.investigators).getLastRow() - 1),
+    clients: Math.max(0, spreadsheet.getSheetByName(SHEETS.clients).getLastRow() - 1),
+    assignments: Math.max(0, spreadsheet.getSheetByName(SHEETS.investigatorHistory).getLastRow() - 1),
   };
 }
 
@@ -482,6 +568,7 @@ function recordToRow(record) {
     cell(record.investigatorInvoiceStatus || "Pendiente"),
     cell(JSON.stringify(Array.isArray(record.journalAccesses) ? record.journalAccesses : [])),
     cell(JSON.stringify(Array.isArray(record.driveFiles) ? record.driveFiles : [])),
+    cell(JSON.stringify(Array.isArray(record.investigatorHistory) ? record.investigatorHistory : [])),
   ];
 }
 
@@ -539,6 +626,7 @@ function readRecords() {
     investigatorInvoiceStatus: text(row["Factura investigador estado"]) || "Pendiente",
     journalAccesses: parseArray(row["Revistas JSON"]),
     driveFiles: parseArray(row["Drive JSON"]),
+    investigatorHistory: parseArray(row["Historial investigadores JSON"]),
   }));
 }
 
@@ -602,6 +690,66 @@ function readInvestigators() {
       createdAt: timestampText(row.Creado),
       updatedAt: timestampText(row.Actualizado),
     }));
+}
+
+function writeClients(records) {
+  const grouped = new Map();
+  (Array.isArray(records) ? records : []).forEach((record) => {
+    if (!text(record.client)) return;
+    const key = text(record.client).toUpperCase();
+    grouped.set(key, [...(grouped.get(key) || []), record]);
+  });
+  const rows = [...grouped.values()].sort((a, b) => text(a[0].client).localeCompare(text(b[0].client))).map((items) => {
+    const profile = items.find((item) => item.clientEmail || item.clientPhone || item.clientId || item.clientInstitution) || items[0];
+    const contracts = items.map((item) => ({
+      id: item.id || "",
+      contractNumber: item.contractNumber || "",
+      topic: item.topic || "",
+      status: item.status || "",
+      startDate: item.contractStartDate || "",
+      endDate: item.contractEndDate || "",
+    }));
+    return [
+      cell(profile.clientId || text(profile.client).toUpperCase()), cell(profile.client), cell(profile.clientId),
+      cell(profile.clientEmail), cell(profile.clientPhone), cell(profile.clientAddress), cell(profile.clientInstitution),
+      items.length, items.filter((item) => !/FINALIZAD|PUBLICAD|CERRAD/i.test(text(item.status))).length,
+      items.reduce((sum, item) => sum + numberValue(item.clientTotal), 0),
+      items.reduce((sum, item) => sum + clientRecordBalance(item), 0),
+      cell(JSON.stringify(contracts)), cell(items.map((item) => item.updatedAt).sort().pop() || new Date().toISOString()),
+    ];
+  });
+  replaceRows(activeSpreadsheet().getSheetByName(SHEETS.clients), CLIENT_HEADERS, rows);
+}
+
+function clientRecordBalance(record) {
+  const payments = Array.isArray(record.clientPayments) ? record.clientPayments : [];
+  const paid = payments.filter((payment) => text(payment.status).toLowerCase() === "pagado")
+    .reduce((sum, payment) => sum + numberValue(payment.amount), 0);
+  if (paid > 0 && numberValue(record.clientTotal) > 0) return Math.max(0, numberValue(record.clientTotal) - paid);
+  if (numberValue(record.outstandingBalance) > 0) return numberValue(record.outstandingBalance);
+  return Math.max(0, numberValue(record.clientTotal) - paid);
+}
+
+function writeInvestigatorHistory(records) {
+  const rows = [];
+  (Array.isArray(records) ? records : []).forEach((record) => {
+    (Array.isArray(record.investigatorHistory) ? record.investigatorHistory : []).forEach((assignment) => {
+      const installments = Array.isArray(assignment.installments) ? assignment.installments : [];
+      const first = installments[0] || {};
+      const second = installments[1] || {};
+      const paid = numberValue(first.paidAmount) + numberValue(second.paidAmount);
+      rows.push([
+        cell(assignment.id), cell(record.id), cell(record.client), cell(record.contractNumber), cell(assignment.investigator),
+        cell(assignment.isCurrent ? "Si" : "No"), cell(assignment.startDate), cell(assignment.endDate),
+        numberValue(assignment.agreedPayment), numberValue(first.amount), numberValue(first.paidAmount),
+        cell(first.scheduledDate), cell(first.paidDate), cell(first.status || "pendiente"),
+        numberValue(second.amount), numberValue(second.paidAmount), cell(second.scheduledDate), cell(second.paidDate),
+        cell(second.status || "pendiente"), paid, Math.max(0, numberValue(assignment.agreedPayment) - paid),
+        cell(assignment.notes), cell(assignment.createdAt), cell(assignment.updatedAt),
+      ]);
+    });
+  });
+  replaceRows(activeSpreadsheet().getSheetByName(SHEETS.investigatorHistory), INVESTIGATOR_HISTORY_HEADERS, rows);
 }
 
 function writeAudit(entries) {

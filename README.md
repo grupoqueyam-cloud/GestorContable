@@ -36,11 +36,15 @@ La URL de Apps Script puede estar publicada en `cloud-config.json`. La clave `SY
 ## 3. Funciones incluidas
 
 - Dashboard general con procesos, cartera, recaudación y estados.
-- Control de clientes y temas.
+- Módulo independiente de clientes que agrupa todos sus contratos.
+- Creación de un nuevo contrato para el mismo cliente con sus datos precargados.
 - Formato único con todas las secciones del proceso.
 - Control de contratos con fechas de inicio, fin y enlace al documento.
 - Catálogo central de investigadores y selector de responsables.
-- Procesos agrupados por investigador, fechas de asignación, honorarios y pagos.
+- Historial completo de todos los investigadores que han participado en cada proceso.
+- Procesos agrupados por investigador, incluidas asignaciones actuales e históricas.
+- Pago de cada asignación del investigador dividido en abono 1 y abono 2, con valores, fechas y estados independientes.
+- Estado editorial desplegable: pendiente, finalizado, elaboración, espera del cliente o por asignar.
 - Producto desplegable: Latindex, Scielo, Scopus o WoS.
 - Indexación desplegable: Latindex, Scielo, Q4, Q3, Q2 o Q1.
 - Varias revistas por proceso, cada una con enlace, usuario y contraseña.
@@ -75,9 +79,9 @@ Cada proceso puede contener:
 - Estado editorial.
 - Una o varias revistas, enlaces públicos, enlaces de acceso, usuarios y contraseñas.
 - Condición de APC y valor, cuando aplique.
-- Investigador actual y anterior, con inicio y fin de la asignación.
+- Investigador actual e historial ilimitado de responsables anteriores, cada uno con inicio y fin de su asignación.
 - Fecha de inicio y fin del contrato, además de las fechas del proceso y aceptación.
-- Honorarios, valor pagado y factura del investigador.
+- Honorarios y dos abonos por cada investigador, además de su factura.
 - Número de contrato, enlace del contrato y orden de producción.
 - Total contratado con el cliente.
 - Correo, documento, teléfono, dirección e institución del cliente.
@@ -144,10 +148,11 @@ https://grupoqueyam-cloud.github.io/GestorContable/
 2. Abra **Extensiones → Apps Script** en la misma hoja que ya utiliza.
 3. Reemplace completamente el contenido anterior de `Code.gs` con `google-apps-script/Code.gs` de este paquete.
 4. Guarde y ejecute la función `configurarHojas`.
-5. La migración conserva los procesos y pagos existentes, agrega las columnas nuevas, crea `Investigadores`, convierte la revista anterior en el primer acceso y copia las fechas anteriores del proceso como fechas contractuales cuando todavía no existen.
-6. Los investigadores que ya aparezcan en los procesos se incorporan automáticamente al catálogo.
-7. Revise manualmente y complete las nuevas fechas de asignación de cada investigador.
-8. Publique una nueva versión de la misma implementación web como se explica en la sección 9.
+5. La migración conserva procesos, pagos, clientes, contratos, credenciales y revistas existentes. Agrega las columnas nuevas y crea `Clientes`, `Investigadores` e `HistorialInvestigadores`.
+6. Los investigadores actuales y anteriores existentes se incorporan automáticamente al catálogo y al historial de su proceso. Cuando el archivo anterior no contiene honorarios o fechas del responsable anterior, esos datos quedan marcados para revisión sin inventar valores de pago.
+7. El valor anterior pagado al investigador se distribuye, sin perderlo, entre los dos abonos del registro migrado. El honorario previsto se divide inicialmente 50/50.
+8. Revise manualmente las fechas históricas y la distribución de los dos abonos cuando el contrato anterior no contenga suficiente detalle.
+9. Publique una nueva versión de la misma implementación web como se explica en la sección 9.
 
 No cree otra hoja ni cambie `SYNC_SECRET` o `cloud-config.json` si desea conservar la conexión existente.
 
@@ -200,8 +205,10 @@ La función creará las siguientes pestañas:
 | `Eliminados` | Identificadores borrados y fecha de eliminación. |
 | `Configuracion` | Versión del esquema y número de revisión. |
 | `Investigadores` | Catálogo de responsables, contacto, especialidad, vigencia y carpeta de Drive. |
+| `Clientes` | Vista consolidada de clientes, datos de contacto, número de contratos, valores y cartera. |
+| `HistorialInvestigadores` | Una fila por cada investigador que haya participado en un proceso, incluyendo sus dos abonos. |
 
-No cambie los nombres de estas pestañas ni los encabezados de la primera fila.
+No cambie los nombres ni los encabezados de la primera fila. `Clientes` e `HistorialInvestigadores` son vistas consolidadas generadas por el sistema; los cambios deben realizarse desde la aplicación.
 
 ## 9. Publicar Google Apps Script
 
@@ -275,12 +282,19 @@ Los Excel se leen temporalmente en la memoria del navegador y sus datos se conso
 
 1. Pulse **Nuevo proceso**.
 2. Si el responsable todavía no existe, cierre el formato, abra **Investigadores** y pulse **Nuevo investigador**.
-3. Complete en el formato único los datos del cliente, contrato, producto, indexación, responsable y fechas obligatorias.
+3. Complete en el formato por secciones los datos del cliente, contrato, producto, indexación, responsable y fechas obligatorias.
 4. Seleccione la prioridad operativa.
 5. Agregue revistas, accesos, APC, pagos, factura del investigador y archivos de Drive según corresponda.
 6. Pulse **Guardar en Google Sheets**.
 
 La pantalla se actualiza solo después de que Google Sheets confirma la escritura.
+
+### Agregar otro contrato al mismo cliente
+
+1. Abra el módulo **Clientes**.
+2. Localice al cliente y pulse **Nuevo contrato**.
+3. El sistema copiará únicamente su identificación y datos de contacto; el contrato, proceso, pagos e investigadores comenzarán vacíos.
+4. También puede usar **Guardar y añadir otro contrato** al finalizar cualquier registro.
 
 ### Editar o eliminar
 
@@ -301,7 +315,9 @@ La pantalla se actualiza solo después de que Google Sheets confirma la escritur
 
 - Abra **Investigadores → Nuevo investigador** para administrar el catálogo central.
 - Solo los investigadores activos aparecen en el selector de nuevos procesos.
-- Cada ficha agrupa los procesos asignados y muestra fechas, avance, cartera asociada, honorarios y pagos pendientes.
+- Cada ficha agrupa las asignaciones actuales e históricas y muestra fechas, avance, cartera, honorarios y pagos pendientes.
+- Al cambiar de responsable, utilice **Añadir investigador** dentro del proceso; no reemplace la entrada anterior.
+- Cada asignación contiene exactamente dos abonos con valor previsto, valor pagado, fecha prevista, fecha pagada y estado.
 - Los investigadores desactivados no se eliminan y permanecen asociados a sus registros históricos.
 
 ### Búsqueda y filtros
@@ -310,7 +326,7 @@ La búsqueda revisa cliente, tema, producto, contrato, revista, investigador, es
 
 ### Exportación
 
-Desde **Importar y exportar**, pulse **Descargar Excel**. El informe contiene las pestañas `Procesos`, `Pagos cliente` e `Investigadores` con los datos vigentes obtenidos de Google Sheets.
+Desde **Importar y exportar**, pulse **Descargar Excel**. El informe contiene `Procesos`, `Pagos cliente`, `Clientes`, `Investigadores` e `Historial investigadores`.
 
 ## 14. Sincronización y trabajo simultáneo
 
@@ -387,7 +403,7 @@ El valor ingresado debe coincidir exactamente con `SYNC_SECRET`. Revise espacios
 
 ### La aplicación pide actualizar el esquema
 
-El sitio nuevo requiere el esquema 2. Reemplace `Code.gs`, ejecute `configurarHojas` y publique una nueva versión de la implementación web. Después recargue GitHub Pages con `Ctrl + F5`.
+El sitio nuevo requiere el esquema 3. Reemplace completamente `Code.gs`, ejecute `configurarHojas` y publique una **nueva versión** de la implementación web. Al abrir la URL `/exec` debe aparecer `"schemaVersion":3`. Después recargue GitHub Pages con `Ctrl + F5`.
 
 ### Un archivo de Drive no muestra vista previa
 
@@ -429,9 +445,11 @@ El sistema está correctamente configurado cuando:
 - La consola no intenta descargar `src/main.tsx`.
 - `favicon.svg`, los archivos de `assets/` y `cloud-config.json` responden sin error 404.
 - La URL `/exec` acepta la clave.
-- Se crean las seis pestañas de Google Sheets, incluida `Investigadores`.
+- Se crean las ocho pestañas de Google Sheets, incluidas `Clientes`, `Investigadores` e `HistorialInvestigadores`.
 - Los Excel se importan y aparecen en `Procesos`.
 - Un investigador nuevo aparece en el selector del formato de procesos.
+- Un cliente muestra todos sus contratos y permite crear otro con sus datos precargados.
+- Cada proceso conserva el historial de investigadores y cada asignación tiene dos abonos.
 - Un proceso admite más de una revista y más de un archivo de Drive.
 - Un registro nuevo aparece inmediatamente en la hoja.
 - Al recargar la página, se solicita nuevamente la clave y los datos vuelven a descargarse desde Google Sheets.
