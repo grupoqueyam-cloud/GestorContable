@@ -1,16 +1,18 @@
 import type {
   AppData,
   AuditEntry,
+  ClientPayment,
   DeletedRecord,
   EditorialRecord,
   GoogleSheetsConfig,
   Investigator,
   InvestigatorAssignment,
   InvestigatorInstallment,
+  InvestigatorPaymentMode,
   JournalAccess,
 } from "./types";
 
-const REQUIRED_SCHEMA_VERSION = 3;
+const REQUIRED_SCHEMA_VERSION = 4;
 
 export interface GoogleSheetsSnapshot {
   schemaVersion: number;
@@ -115,6 +117,30 @@ const normalizeInstallment = (
   };
 };
 
+const normalizeClientPayments = (record: EditorialRecord): ClientPayment[] =>
+  (Array.isArray(record.clientPayments) ? record.clientPayments : []).map((payment, index) => {
+    const amount = Math.max(0, Number(payment.amount) || 0);
+    const storedPaid = Number(payment.paidAmount);
+    const paidAmount = Number.isFinite(storedPaid)
+      ? Math.max(0, storedPaid)
+      : payment.status === "pagado"
+        ? amount
+        : 0;
+    const status = paidAmount > 0
+      ? amount <= 0 || paidAmount >= amount ? "pagado" : "parcial"
+      : payment.status === "vencido" ? "vencido" : "pendiente";
+    return {
+      id: payment.id || `${record.id || "payment"}-${index + 1}`,
+      concept: payment.concept || "Pago",
+      scheduledDate: payment.scheduledDate || "",
+      paidDate: payment.paidDate || "",
+      amount,
+      paidAmount,
+      status,
+      note: payment.note || "",
+    };
+  });
+
 const legacyAssignments = (record: EditorialRecord): InvestigatorAssignment[] => {
   const currentInvestigator = String(record.investigator || "").trim();
   const previousInvestigator = String(record.previousInvestigator || "").trim();
@@ -134,6 +160,7 @@ const legacyAssignments = (record: EditorialRecord): InvestigatorAssignment[] =>
       startDate: record.contractStartDate || record.startDate || "",
       endDate: record.investigatorStartDate || record.endDate || record.contractEndDate || "",
       agreedPayment: 0,
+      paymentMode: "dos_abonos",
       installments: [normalizeInstallment(undefined, 1), normalizeInstallment(undefined, 2)],
       notes: "Migrado como investigador anterior; revise fechas y honorarios",
       isCurrent: false,
@@ -148,6 +175,7 @@ const legacyAssignments = (record: EditorialRecord): InvestigatorAssignment[] =>
     startDate: record.investigatorStartDate || record.startDate || "",
     endDate: record.investigatorEndDate || record.endDate || "",
     agreedPayment: fee,
+    paymentMode: "dos_abonos",
     installments: [
       normalizeInstallment({ amount: firstAmount, paidAmount: firstPaid }, 1),
       normalizeInstallment({ amount: secondAmount, paidAmount: secondPaid }, 2),
@@ -168,16 +196,28 @@ const normalizeInvestigatorHistory = (record: EditorialRecord): InvestigatorAssi
     const fee = Math.max(0, Number(item.agreedPayment) || 0);
     const half = Math.round((fee / 2) * 100) / 100;
     const installments = Array.isArray(item.installments) ? item.installments : [];
+    const paymentMode: InvestigatorPaymentMode = item.paymentMode === "unico" ? "unico" : "dos_abonos";
+    const normalizedInstallments = paymentMode === "unico"
+      ? [
+          normalizeInstallment({
+            ...installments[0],
+            amount: fee,
+            paidAmount: (Number(installments[0]?.paidAmount) || 0) + (Number(installments[1]?.paidAmount) || 0),
+          }, 1, fee),
+          normalizeInstallment(undefined, 2),
+        ] as [InvestigatorInstallment, InvestigatorInstallment]
+      : [
+          normalizeInstallment(installments[0], 1, half),
+          normalizeInstallment(installments[1], 2, Math.max(0, fee - half)),
+        ] as [InvestigatorInstallment, InvestigatorInstallment];
     return {
       id: item.id || `${record.id || "process"}-assignment-${index + 1}`,
       investigator: item.investigator || "",
       startDate: item.startDate || "",
       endDate: item.endDate || "",
       agreedPayment: fee,
-      installments: [
-        normalizeInstallment(installments[0], 1, half),
-        normalizeInstallment(installments[1], 2, Math.max(0, fee - half)),
-      ] as [InvestigatorInstallment, InvestigatorInstallment],
+      paymentMode,
+      installments: normalizedInstallments,
       notes: item.notes || "",
       isCurrent: Boolean(item.isCurrent),
       createdAt: item.createdAt || record.createdAt || new Date().toISOString(),
@@ -208,7 +248,7 @@ const normalizeRecord = (record: EditorialRecord): EditorialRecord => {
     username: record.username || primary?.username || "",
     password: record.password || primary?.password || "",
     contractStartDate: record.contractStartDate || record.startDate || "",
-    contractEndDate: record.contractEndDate || record.endDate || "",
+    contractEndDate: record.contractEndDate || "",
     contractLink: record.contractLink || "",
     investigator: currentAssignment?.investigator || record.investigator || "",
     previousInvestigator: previousAssignment?.investigator || record.previousInvestigator || "",
@@ -225,8 +265,13 @@ const normalizeRecord = (record: EditorialRecord): EditorialRecord => {
     clientPhone: record.clientPhone || "",
     clientAddress: record.clientAddress || "",
     clientInstitution: record.clientInstitution || "",
+    clientType: record.clientType || "Existente",
+    seller: record.seller || "",
+    salesChannel: record.salesChannel || "",
+    saleDate: record.saleDate || "",
+    salesNotes: record.salesNotes || "",
     driveFiles: Array.isArray(record.driveFiles) ? record.driveFiles : [],
-    clientPayments: Array.isArray(record.clientPayments) ? record.clientPayments : [],
+    clientPayments: normalizeClientPayments(record),
     sources: Array.isArray(record.sources) ? record.sources : [],
   };
 };
@@ -249,7 +294,7 @@ const normalizeInvestigator = (investigator: Investigator): Investigator => ({
 
 export const normalizeAppData = (data: AppData): AppData => ({
   ...data,
-  version: 5,
+  version: 6,
   records: Array.isArray(data.records) ? data.records.map(normalizeRecord) : [],
   investigators: Array.isArray(data.investigators) ? data.investigators.map(normalizeInvestigator) : [],
   auditLog: Array.isArray(data.auditLog) ? data.auditLog : [],
@@ -489,7 +534,7 @@ export const syncGoogleSheets = async (source: AppData): Promise<SyncResult> => 
       return {
         data: normalizeAppData({
           ...merged,
-          version: 5,
+          version: 6,
           googleSheets: { ...config, remoteRevision, lastSyncAt },
         }),
         remoteRevision,

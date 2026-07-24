@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { mergeGoogleSnapshot, normalizeAppData } from "../lib/google-sheets";
-import { blankRecord } from "../lib/format";
+import { blankRecord, clientBalance, paidByClient, statusProgress } from "../lib/format";
 import type { AppData, EditorialRecord } from "../lib/types";
 
 const record = (id: string, client: string, updatedAt: string): EditorialRecord => ({
@@ -14,7 +14,7 @@ const record = (id: string, client: string, updatedAt: string): EditorialRecord 
 });
 
 const base = (records: EditorialRecord[]): AppData => normalizeAppData({
-  version: 5,
+  version: 6,
   records,
   investigators: [],
   auditLog: [],
@@ -27,7 +27,7 @@ test("combina por ID y conserva la version mas reciente", () => {
   const remoteA = record("a", "Cliente remoto antiguo", "2026-01-01T00:00:00.000Z");
   const remoteB = record("b", "Cliente remoto", "2026-03-01T00:00:00.000Z");
   const merged = mergeGoogleSnapshot(local, {
-    schemaVersion: 3,
+    schemaVersion: 4,
     revision: 4,
     serverTime: "2026-03-01T00:00:00.000Z",
     records: [remoteA, remoteB],
@@ -45,7 +45,7 @@ test("respeta eliminaciones y no borra credenciales de acceso omitidas", () => {
   const localB = record("b", "Eliminar", "2026-02-01T00:00:00.000Z");
   const remoteA = { ...localA, client: "Cliente actualizado", username: "", password: "", journalAccesses: localA.journalAccesses.map((item) => ({ ...item, username: "", password: "" })), updatedAt: "2026-03-01T00:00:00.000Z" };
   const merged = mergeGoogleSnapshot(base([localA, localB]), {
-    schemaVersion: 3,
+    schemaVersion: 4,
     revision: 8,
     serverTime: "2026-04-01T00:00:00.000Z",
     records: [remoteA],
@@ -86,9 +86,9 @@ test("migra campos anteriores al formato unificado", () => {
     deletedRecords: [],
     importedAt: "2025-01-01T00:00:00.000Z",
   });
-  assert.equal(normalized.version, 5);
+  assert.equal(normalized.version, 6);
   assert.equal(normalized.records[0].contractStartDate, "2025-02-01");
-  assert.equal(normalized.records[0].contractEndDate, "2025-12-01");
+  assert.equal(normalized.records[0].contractEndDate, "");
   assert.equal(normalized.records[0].hasApc, true);
   assert.equal(normalized.records[0].journalAccesses[0].journal, "Revista heredada");
   assert.equal(normalized.records[0].investigatorHistory.length, 2);
@@ -106,7 +106,7 @@ test("agrupa y conserva el investigador con la actualización más reciente", ()
   const local = base([]);
   local.investigators = [{ id: "i-1", name: "Ana Pérez", documentId: "", email: "", phone: "", specialty: "Local", startDate: "", endDate: "", driveFolderUrl: "", notes: "", active: true, createdAt: "2026-01-01T00:00:00.000Z", updatedAt: "2026-01-01T00:00:00.000Z" }];
   const merged = mergeGoogleSnapshot(local, {
-    schemaVersion: 3,
+    schemaVersion: 4,
     revision: 2,
     serverTime: "2026-02-01T00:00:00.000Z",
     records: [],
@@ -127,6 +127,7 @@ test("conserva todo el historial y solo un investigador como responsable actual"
       startDate: "2026-01-01",
       endDate: "2026-02-28",
       agreedPayment: 600,
+      paymentMode: "dos_abonos",
       installments: [
         { number: 1, amount: 300, paidAmount: 300, scheduledDate: "2026-01-31", paidDate: "2026-01-30", status: "pagado" },
         { number: 2, amount: 300, paidAmount: 300, scheduledDate: "2026-02-28", paidDate: "2026-02-28", status: "pagado" },
@@ -142,6 +143,7 @@ test("conserva todo el historial y solo un investigador como responsable actual"
       startDate: "2026-03-01",
       endDate: "2026-06-30",
       agreedPayment: 800,
+      paymentMode: "dos_abonos",
       installments: [
         { number: 1, amount: 400, paidAmount: 200, scheduledDate: "2026-04-01", paidDate: "2026-04-01", status: "parcial" },
         { number: 2, amount: 400, paidAmount: 0, scheduledDate: "2026-06-30", paidDate: "", status: "pendiente" },
@@ -165,7 +167,7 @@ test("conserva todo el historial y solo un investigador como responsable actual"
   assert.equal(result.investigatorHistory[1].installments[1].status, "pendiente");
 });
 
-test("normaliza cada pago de investigador a exactamente dos abonos", () => {
+test("normaliza pagos heredados de investigador en dos abonos", () => {
   const process = record("installments", "Cliente abonos", "2026-06-01T00:00:00.000Z");
   process.investigatorHistory = [{
     id: "assignment-installments",
@@ -173,6 +175,7 @@ test("normaliza cada pago de investigador a exactamente dos abonos", () => {
     startDate: "2026-01-01",
     endDate: "2026-12-31",
     agreedPayment: 1000,
+    paymentMode: "dos_abonos",
     installments: [
       { number: 1, amount: 500, paidAmount: 900, scheduledDate: "2026-03-01", paidDate: "2026-03-01", status: "pendiente" },
     ] as unknown as EditorialRecord["investigatorHistory"][number]["installments"],
@@ -203,4 +206,71 @@ test("no pierde un pago heredado aunque supere el honorario registrado", () => {
   assert.equal(assignment.agreedPayment, 180);
   assert.equal(assignment.installments.reduce((sum, item) => sum + item.paidAmount, 0), 180);
   assert.equal(result.investigatorPaid, 180);
+});
+
+test("calcula el saldo con pagos completos y parciales sin dejar deuda pagada", () => {
+  const process = record("client-payments", "Cliente pagos", "2026-06-01T00:00:00.000Z");
+  process.clientTotal = 1000;
+  process.outstandingBalance = 1000;
+  process.clientPayments = [
+    { id: "payment-1", concept: "Primer pago", scheduledDate: "", paidDate: "2026-01-01", amount: 600, paidAmount: 600, status: "pagado", note: "" },
+    { id: "payment-2", concept: "Segundo pago", scheduledDate: "", paidDate: "2026-02-01", amount: 400, paidAmount: 400, status: "pagado", note: "" },
+  ];
+  assert.equal(paidByClient(process), 1000);
+  assert.equal(clientBalance(process), 0);
+
+  process.clientPayments[1] = { ...process.clientPayments[1], paidAmount: 150, status: "parcial" };
+  assert.equal(paidByClient(process), 750);
+  assert.equal(clientBalance(process), 250);
+});
+
+test("migra pagos antiguos marcados como pagados al nuevo valor pagado", () => {
+  const process = record("legacy-client-payment", "Cliente pago antiguo", "2026-06-01T00:00:00.000Z");
+  process.clientTotal = 300;
+  process.clientPayments = [{
+    id: "legacy-payment",
+    concept: "Pago total",
+    scheduledDate: "",
+    paidDate: "2026-05-01",
+    amount: 300,
+    status: "pagado",
+    note: "",
+  } as unknown as EditorialRecord["clientPayments"][number]];
+  const normalized = normalizeAppData(base([process])).records[0];
+  assert.equal(normalized.clientPayments[0].paidAmount, 300);
+  assert.equal(clientBalance(normalized), 0);
+});
+
+test("aplica los porcentajes editoriales solicitados", () => {
+  assert.equal(statusProgress("Por asignar"), 0);
+  assert.equal(statusProgress("Elaboración"), 25);
+  assert.equal(statusProgress("Enviado a la revista"), 50);
+  assert.equal(statusProgress("Revisión Pares"), 75);
+  assert.equal(statusProgress("Publicado"), 100);
+});
+
+test("conserva modalidad de pago único con un segundo abono vacío", () => {
+  const process = record("single-payment", "Cliente pago único", "2026-06-01T00:00:00.000Z");
+  process.investigatorHistory = [{
+    id: "assignment-single",
+    investigator: "Elena López",
+    startDate: "2026-01-01",
+    endDate: "2026-12-31",
+    agreedPayment: 500,
+    paymentMode: "unico",
+    installments: [
+      { number: 1, amount: 500, paidAmount: 500, scheduledDate: "", paidDate: "2026-03-01", status: "pagado" },
+      { number: 2, amount: 250, paidAmount: 0, scheduledDate: "2026-04-01", paidDate: "", status: "pendiente" },
+    ],
+    notes: "",
+    isCurrent: true,
+    createdAt: "2026-01-01T00:00:00.000Z",
+    updatedAt: "2026-06-01T00:00:00.000Z",
+  }];
+  const assignment = normalizeAppData(base([process])).records[0].investigatorHistory[0];
+  assert.equal(assignment.paymentMode, "unico");
+  assert.equal(assignment.installments[0].amount, 500);
+  assert.equal(assignment.installments[0].paidAmount, 500);
+  assert.equal(assignment.installments[1].amount, 0);
+  assert.equal(assignment.installments[1].paidAmount, 0);
 });

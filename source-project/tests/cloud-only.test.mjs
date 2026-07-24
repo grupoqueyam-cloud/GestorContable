@@ -11,4 +11,8 @@ test("no incluye almacenamiento local ni una base de datos en GitHub", () => {
   assert.equal(existsSync("lib/storage.ts"), false);
   assert.equal(existsSync("public/base-inicial.enc.json"), false);
   assert.equal(existsSync("public/cloud-config.json"), true);
+  assert.match(app, /20 \* 60 \* 1000/);
+  assert.match(app, /Fin del contrato \(opcional\)/);
+  assert.match(app, /Tesis Doctoral/);
+  assert.match(app, /Pago único/);
 });

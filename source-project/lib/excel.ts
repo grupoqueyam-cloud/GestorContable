@@ -2,7 +2,9 @@ import type { AppData, ClientPayment, EditorialRecord, Investigator } from "./ty
 import {
   blankRecord,
   canonicalKey,
+  clientBalance,
   normalizeText,
+  paidByClient,
   statusProgress,
   toDate,
   toNumber,
@@ -39,6 +41,7 @@ const paymentFromCell = (value: CellValue, concept: string): ClientPayment | nul
     scheduledDate: "",
     paidDate: "",
     amount,
+    paidAmount: paid ? amount : 0,
     status: paid ? "pagado" : "pendiente",
     note: amount > 0 ? "Importado desde Excel" : raw,
   };
@@ -99,6 +102,11 @@ export const mergeRecordSets = (
       "clientPhone",
       "clientAddress",
       "clientInstitution",
+      "clientType",
+      "seller",
+      "salesChannel",
+      "saleDate",
+      "salesNotes",
       "investigatorInvoiceNumber",
       "investigatorInvoiceDate",
       "investigatorInvoiceLink",
@@ -391,7 +399,7 @@ export const importExcelFiles = async (
 };
 
 export const makeEmptyData = (): AppData => ({
-  version: 5,
+  version: 6,
   records: [],
   investigators: [],
   auditLog: [],
@@ -447,6 +455,11 @@ export const exportWorkbook = async (records: EditorialRecord[], investigators: 
     "Teléfono cliente",
     "Dirección cliente",
     "Institución cliente",
+    "Tipo de cliente",
+    "Vendedor",
+    "Canal de venta",
+    "Fecha de venta",
+    "Información de ventas",
     "Revistas y accesos JSON",
     "Archivos Drive JSON",
     "Historial investigadores JSON",
@@ -496,6 +509,11 @@ export const exportWorkbook = async (records: EditorialRecord[], investigators: 
       record.clientPhone,
       record.clientAddress,
       record.clientInstitution,
+      record.clientType,
+      record.seller,
+      record.salesChannel,
+      record.saleDate,
+      record.salesNotes,
       JSON.stringify(record.journalAccesses),
       JSON.stringify(record.driveFiles),
       JSON.stringify(record.investigatorHistory),
@@ -511,7 +529,7 @@ export const exportWorkbook = async (records: EditorialRecord[], investigators: 
   });
 
   const payments = workbook.addWorksheet("Pagos cliente");
-  payments.addRow(["Cliente", "Contrato", "Concepto", "Fecha prevista", "Fecha pagada", "Monto", "Estado", "Nota"]);
+  payments.addRow(["Cliente", "Contrato", "Concepto", "Fecha prevista", "Fecha pagada", "Valor previsto", "Valor pagado", "Estado", "Nota"]);
   records.forEach((record) =>
     record.clientPayments.forEach((payment) =>
       payments.addRow([
@@ -521,6 +539,7 @@ export const exportWorkbook = async (records: EditorialRecord[], investigators: 
         payment.scheduledDate,
         payment.paidDate,
         payment.amount,
+        payment.paidAmount,
         payment.status,
         payment.note,
       ]),
@@ -529,10 +548,10 @@ export const exportWorkbook = async (records: EditorialRecord[], investigators: 
   payments.getRow(1).font = { bold: true, color: { argb: "FFFFFFFF" } };
   payments.getRow(1).fill = { type: "pattern", pattern: "solid", fgColor: { argb: "FF2D7268" } };
   payments.views = [{ state: "frozen", ySplit: 1 }];
-  payments.columns = [26, 22, 22, 18, 18, 16, 16, 40].map((width) => ({ width }));
+  payments.columns = [26, 22, 22, 18, 18, 16, 16, 16, 40].map((width) => ({ width }));
 
   const clients = workbook.addWorksheet("Clientes");
-  clients.addRow(["Cliente", "Documento", "Correo", "Teléfono", "Dirección", "Institución", "Contratos", "Contratos activos", "Valor total", "Cartera", "Números de contrato"]);
+  clients.addRow(["Cliente", "Tipo", "Documento", "Correo", "Teléfono", "Dirección", "Institución", "Vendedor", "Canal", "Contratos", "Contratos activos", "Valor total", "Pagado", "Cartera", "Números de contrato"]);
   const clientGroups = new Map<string, EditorialRecord[]>();
   records.forEach((record) => {
     const key = normalizeText(record.client).toUpperCase() || record.id;
@@ -542,30 +561,34 @@ export const exportWorkbook = async (records: EditorialRecord[], investigators: 
     const profile = items.find((item) => item.clientEmail || item.clientPhone || item.clientId || item.clientInstitution) || items[0];
     clients.addRow([
       profile.client,
+      profile.clientType,
       profile.clientId,
       profile.clientEmail,
       profile.clientPhone,
       profile.clientAddress,
       profile.clientInstitution,
+      profile.seller,
+      profile.salesChannel,
       items.length,
       items.filter((item) => item.status !== "Finalizado").length,
       items.reduce((sum, item) => sum + item.clientTotal, 0),
-      items.reduce((sum, item) => sum + Math.max(0, item.outstandingBalance), 0),
+      items.reduce((sum, item) => sum + paidByClient(item), 0),
+      items.reduce((sum, item) => sum + clientBalance(item), 0),
       items.map((item) => item.contractNumber).filter(Boolean).join(" · "),
     ]);
   });
   clients.getRow(1).font = { bold: true, color: { argb: "FFFFFFFF" } };
   clients.getRow(1).fill = { type: "pattern", pattern: "solid", fgColor: { argb: "FF173F3A" } };
   clients.views = [{ state: "frozen", ySplit: 1 }];
-  clients.autoFilter = `A1:K${Math.max(1, clientGroups.size + 1)}`;
-  clients.columns = [28, 20, 28, 18, 32, 26, 14, 16, 16, 16, 38].map((width) => ({ width }));
+  clients.autoFilter = `A1:O${Math.max(1, clientGroups.size + 1)}`;
+  clients.columns = [28, 16, 20, 28, 18, 32, 26, 24, 18, 14, 16, 16, 16, 16, 38].map((width) => ({ width }));
 
   const assignmentHistory = workbook.addWorksheet("Historial investigadores");
   assignmentHistory.addRow([
     "ID asignación", "ID proceso", "Cliente", "Contrato", "Investigador", "Responsable actual",
     "Inicio", "Fin", "Honorario", "Abono 1 previsto", "Abono 1 pagado", "Fecha prevista 1",
     "Fecha pagada 1", "Estado 1", "Abono 2 previsto", "Abono 2 pagado", "Fecha prevista 2",
-    "Fecha pagada 2", "Estado 2", "Total pagado", "Pendiente", "Notas",
+    "Fecha pagada 2", "Estado 2", "Total pagado", "Pendiente", "Modalidad de pago", "Notas",
   ]);
   records.forEach((record) => record.investigatorHistory.forEach((assignment) => {
     const first = assignment.installments[0];
@@ -576,14 +599,14 @@ export const exportWorkbook = async (records: EditorialRecord[], investigators: 
       assignment.isCurrent ? "Sí" : "No", assignment.startDate, assignment.endDate, assignment.agreedPayment,
       first.amount, first.paidAmount, first.scheduledDate, first.paidDate, first.status,
       second.amount, second.paidAmount, second.scheduledDate, second.paidDate, second.status,
-      paid, Math.max(0, assignment.agreedPayment - paid), assignment.notes,
+      paid, Math.max(0, assignment.agreedPayment - paid), assignment.paymentMode === "unico" ? "Pago único" : "Dos abonos", assignment.notes,
     ]);
   }));
   assignmentHistory.getRow(1).font = { bold: true, color: { argb: "FFFFFFFF" } };
   assignmentHistory.getRow(1).fill = { type: "pattern", pattern: "solid", fgColor: { argb: "FF536E8A" } };
   assignmentHistory.views = [{ state: "frozen", ySplit: 1 }];
-  assignmentHistory.autoFilter = `A1:V${Math.max(1, assignmentHistory.rowCount)}`;
-  assignmentHistory.columns = [20, 18, 26, 20, 26, 16, 16, 16, 16, 18, 18, 18, 18, 14, 18, 18, 18, 18, 14, 16, 16, 36].map((width) => ({ width }));
+  assignmentHistory.autoFilter = `A1:W${Math.max(1, assignmentHistory.rowCount)}`;
+  assignmentHistory.columns = [20, 18, 26, 20, 26, 16, 16, 16, 16, 18, 18, 18, 18, 14, 18, 18, 18, 18, 14, 16, 16, 18, 36].map((width) => ({ width }));
 
   const team = workbook.addWorksheet("Investigadores");
   team.addRow([

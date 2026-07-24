@@ -80,6 +80,8 @@ import {
   normalizeText,
   paidByClient,
   paymentRisk,
+  statusProgress,
+  toNumber,
   uid,
 } from "../lib/format";
 import {
@@ -117,10 +119,13 @@ const EMPTY_FILTERS: Filters = {
 };
 
 const PIE_COLORS = ["#2f8f7f", "#e3aa3d", "#d66d5d", "#5d7fa3", "#81907d", "#725ea8"];
-const INDEXATION_OPTIONS = ["Latindex", "Scielo", "Q4", "Q3", "Q2", "Q1"];
-const PRODUCT_OPTIONS = ["Latindex", "Scielo", "Scopus", "WoS"];
-const EDITORIAL_STATUS_OPTIONS = ["Pendiente", "Finalizado", "Elaboración", "Espera del cliente", "Por asignar"];
+const ACADEMIC_PRODUCT_OPTIONS = ["Tesis pregrado", "Monografía", "Tesis Doctoral", "Tesis Postgrado", "Fast Track"];
+const INDEXATION_OPTIONS = ["Latindex", "Scielo", "Q4", "Q3", "Q2", "Q1", ...ACADEMIC_PRODUCT_OPTIONS];
+const PRODUCT_OPTIONS = ["Latindex", "Scielo", "Scopus", "WoS", ...ACADEMIC_PRODUCT_OPTIONS];
+const EDITORIAL_STATUS_OPTIONS = ["Por asignar", "Pendiente", "Elaboración", "Enviado a la revista", "Revisión Pares", "Espera del cliente", "Publicado", "Finalizado"];
 const OPERATIONAL_OPTIONS = ["Normal", "Urgente", "Estancado", "Espera del cliente"] as const;
+const CLIENT_TYPE_OPTIONS = ["Nuevo", "Existente", "Recomendado"];
+const SALES_CHANNEL_OPTIONS = ["Facebook", "Instagram", "TikTok", "Recomendación", "Fidelización", "WhatsApp"];
 
 const NAV_ITEMS: { key: ViewKey; label: string; icon: typeof LayoutDashboard }[] = [
   { key: "dashboard", label: "Resumen ejecutivo", icon: LayoutDashboard },
@@ -143,6 +148,7 @@ type ColumnKey =
   | "indexation"
   | "status"
   | "priority"
+  | "sales"
   | "credentials"
   | "journal"
   | "link"
@@ -163,6 +169,7 @@ const COLUMN_LABELS: Record<ColumnKey, string> = {
   indexation: "Indexación",
   status: "Estado",
   priority: "Prioridad",
+  sales: "Ventas",
   credentials: "Usuarios / contraseñas",
   journal: "Revista",
   link: "Link",
@@ -191,16 +198,19 @@ const DEFAULT_COLUMNS: ColumnKey[] = [
 
 const statusBucket = (status: string) => {
   const value = normalizeText(status).toUpperCase();
-  if (/PUBLICAD|FINALIZAD|CERRAD/.test(value)) return "Finalizado";
+  if (/PUBLICAD/.test(value)) return "Publicado";
+  if (/FINALIZAD|CERRAD/.test(value)) return "Finalizado";
   if (/ESPERA.*CLIENTE/.test(value)) return "Espera del cliente";
   if (/POR.*ASIGNAR|SIN.*ASIGNAR/.test(value)) return "Por asignar";
-  if (/ELABOR|DESARROLL|PROCESO|CORRECCION|PARES|REVISION|ENVIAD|SUBID|REVISTA|ACEPTAD/.test(value)) return "Elaboración";
+  if (/PARES|REVISION/.test(value)) return "Revisión Pares";
+  if (/ENVIAD|SUBID|REVISTA|ACEPTAD/.test(value)) return "Enviado a la revista";
+  if (/ELABOR|DESARROLL|PROCESO|CORRECCION/.test(value)) return "Elaboración";
   return "Pendiente";
 };
 
 const statusClass = (status: string) => {
   const bucket = statusBucket(status);
-  if (bucket === "Finalizado") return "success";
+  if (["Publicado", "Finalizado"].includes(bucket)) return "success";
   if (["Pendiente", "Espera del cliente", "Por asignar"].includes(bucket)) return "warning";
   return "info";
 };
@@ -253,7 +263,7 @@ function CloudAuthScreen({ onReady }: { onReady: (data: AppData) => void }) {
       };
       const snapshot = await pullGoogleSheets(config);
       onReady(normalizeAppData({
-        version: 5,
+        version: 6,
         records: snapshot.records,
         investigators: snapshot.investigators,
         auditLog: snapshot.auditLog,
@@ -312,6 +322,36 @@ function ProgressBar({ value, compact = false }: { value: number; compact?: bool
       <strong>{safe}%</strong>
     </div>
   );
+}
+
+function DecimalInput({
+  value,
+  onValue,
+  ariaLabel,
+}: {
+  value: number;
+  onValue: (value: number) => void;
+  ariaLabel?: string;
+}) {
+  const focused = useRef(false);
+  const [text, setText] = useState(() => String(Number(value) || 0));
+  useEffect(() => {
+    if (!focused.current && toNumber(text) !== Number(value || 0)) setText(String(Number(value) || 0));
+  }, [value, text]);
+  return <input
+    type="text"
+    inputMode="decimal"
+    aria-label={ariaLabel}
+    value={text}
+    onFocus={() => { focused.current = true; }}
+    onBlur={() => { focused.current = false; }}
+    onChange={(event) => {
+      const next = event.target.value;
+      if (!/^\d*(?:[.,]\d{0,2})?$/.test(next)) return;
+      setText(next);
+      onValue(Math.max(0, toNumber(next)));
+    }}
+  />;
 }
 
 function KpiCard({ label, value, note, icon, tone }: { label: string; value: string; note: string; icon: ReactNode; tone: string }) {
@@ -390,6 +430,24 @@ function RecordModal({
       investigatorHistory: current.investigatorHistory.map((item) => {
         if (item.id !== id) return item;
         const agreedPayment = Math.max(0, Number(value) || 0);
+        if (item.paymentMode === "unico") {
+          const paid = item.installments.reduce((sum, installment) => sum + installment.paidAmount, 0);
+          const amount = Math.max(agreedPayment, paid);
+          return {
+            ...item,
+            agreedPayment: amount,
+            installments: [
+              {
+                ...item.installments[0],
+                amount,
+                paidAmount: Math.min(paid, amount || paid),
+                status: paid <= 0 ? "pendiente" : amount > 0 && paid >= amount ? "pagado" : "parcial",
+              },
+              { ...item.installments[1], amount: 0, paidAmount: 0, scheduledDate: "", paidDate: "", status: "pendiente" },
+            ],
+            updatedAt: new Date().toISOString(),
+          };
+        }
         const previousTotal = item.installments.reduce((sum, installment) => sum + installment.amount, 0);
         const canSplit = item.installments.every((installment) => installment.paidAmount === 0)
           && Math.abs(previousTotal - item.agreedPayment) < 0.01;
@@ -401,6 +459,45 @@ function RecordModal({
           installments: [
             { ...item.installments[0], amount: first },
             { ...item.installments[1], amount: Math.max(0, Math.round((agreedPayment - first) * 100) / 100) },
+          ],
+          updatedAt: new Date().toISOString(),
+        };
+      }),
+    }));
+  const updateAssignmentPaymentMode = (id: string, paymentMode: InvestigatorAssignment["paymentMode"]) =>
+    setDraft((current) => ({
+      ...current,
+      investigatorHistory: current.investigatorHistory.map((item) => {
+        if (item.id !== id) return item;
+        const paid = item.installments.reduce((sum, installment) => sum + installment.paidAmount, 0);
+        if (paymentMode === "unico") {
+          const amount = Math.max(item.agreedPayment, paid);
+          return {
+            ...item,
+            paymentMode,
+            agreedPayment: amount,
+            installments: [
+              {
+                ...item.installments[0],
+                amount,
+                paidAmount: Math.min(paid, amount || paid),
+                status: paid <= 0 ? "pendiente" : amount > 0 && paid >= amount ? "pagado" : "parcial",
+              },
+              { ...item.installments[1], amount: 0, paidAmount: 0, scheduledDate: "", paidDate: "", status: "pendiente" },
+            ],
+            updatedAt: new Date().toISOString(),
+          };
+        }
+        const firstAmount = Math.round((item.agreedPayment / 2) * 100) / 100;
+        const secondAmount = Math.max(0, Math.round((item.agreedPayment - firstAmount) * 100) / 100);
+        const firstPaid = Math.min(paid, firstAmount || paid);
+        const secondPaid = Math.max(0, Math.min(paid - firstPaid, secondAmount));
+        return {
+          ...item,
+          paymentMode,
+          installments: [
+            { ...item.installments[0], amount: firstAmount, paidAmount: firstPaid, status: firstPaid <= 0 ? "pendiente" : firstPaid >= firstAmount ? "pagado" : "parcial" },
+            { ...item.installments[1], amount: secondAmount, paidAmount: secondPaid, status: secondPaid <= 0 ? "pendiente" : secondPaid >= secondAmount ? "pagado" : "parcial" },
           ],
           updatedAt: new Date().toISOString(),
         };
@@ -449,14 +546,13 @@ function RecordModal({
       [draft.product, "producto"],
       [draft.indexation, "indexación"],
       [draft.contractStartDate, "fecha inicial del contrato"],
-      [draft.contractEndDate, "fecha final del contrato"],
     ];
     const missing = required.find(([value]) => !String(value).trim());
     if (missing) {
       setError(`Completa el campo obligatorio: ${missing[1]}.`);
       return;
     }
-    if (draft.contractEndDate < draft.contractStartDate) {
+    if (draft.contractEndDate && draft.contractEndDate < draft.contractStartDate) {
       setError("La fecha final del contrato no puede ser anterior a la fecha inicial.");
       return;
     }
@@ -480,26 +576,47 @@ function RecordModal({
       - (Number(item.agreedPayment) || 0),
     ) > 0.01);
     if (invalidInstallments) {
-      setError(`Los dos abonos de ${invalidInstallments.investigator} deben sumar exactamente el honorario acordado.`);
+      setError(invalidInstallments.paymentMode === "unico"
+        ? `El pago único de ${invalidInstallments.investigator} debe coincidir con el honorario acordado.`
+        : `Los dos abonos de ${invalidInstallments.investigator} deben sumar exactamente el honorario acordado.`);
       return;
     }
     const currentId = assignments.find((item) => item.isCurrent)?.id || assignments.at(-1)?.id;
-    const normalizedAssignments = assignments.map((item) => ({
-      ...item,
-      agreedPayment: Math.max(0, Number(item.agreedPayment) || 0),
-      isCurrent: item.id === currentId,
-      installments: item.installments.map((installment) => {
+    const normalizedAssignments = assignments.map((item) => {
+      const agreedPayment = Math.max(0, Number(item.agreedPayment) || 0);
+      const paidTotal = item.installments.reduce((sum, installment) => sum + Math.max(0, Number(installment.paidAmount) || 0), 0);
+      const sourceInstallments = item.paymentMode === "unico"
+        ? [
+            { ...item.installments[0], amount: Math.max(agreedPayment, paidTotal), paidAmount: paidTotal },
+            { ...item.installments[1], amount: 0, paidAmount: 0, scheduledDate: "", paidDate: "", status: "pendiente" as const },
+          ] as [InvestigatorInstallment, InvestigatorInstallment]
+        : item.installments;
+      return {
+        ...item,
+        agreedPayment: item.paymentMode === "unico" ? Math.max(agreedPayment, paidTotal) : agreedPayment,
+        paymentMode: item.paymentMode === "unico" ? "unico" as const : "dos_abonos" as const,
+        isCurrent: item.id === currentId,
+        installments: sourceInstallments.map((installment) => {
         const amount = Math.max(0, Number(installment.amount) || 0);
         const paidAmount = Math.max(0, Math.min(Number(installment.paidAmount) || 0, amount || Number(installment.paidAmount) || 0));
         const status = paidAmount <= 0 ? "pendiente" : amount > 0 && paidAmount >= amount ? "pagado" : "parcial";
         return { ...installment, amount, paidAmount, status };
       }) as [InvestigatorInstallment, InvestigatorInstallment],
       updatedAt: new Date().toISOString(),
-    }));
+      };
+    });
     const currentAssignment = normalizedAssignments.find((item) => item.isCurrent) || normalizedAssignments.at(-1);
     const previousAssignment = [...normalizedAssignments].reverse().find((item) => item.id !== currentAssignment?.id);
     const journalAccesses = draft.journalAccesses.filter((item) => [item.journal, item.journalLink, item.loginLink, item.username, item.password].some((value) => value.trim()));
     const driveFiles = draft.driveFiles.filter((item) => item.name.trim() || item.url.trim());
+    const clientPayments = draft.clientPayments.map((payment) => {
+      const amount = Math.max(0, Number(payment.amount) || 0);
+      const paidAmount = Math.max(0, Number(payment.paidAmount) || 0);
+      const status: ClientPayment["status"] = paidAmount > 0
+        ? amount <= 0 || paidAmount >= amount ? "pagado" : "parcial"
+        : payment.status === "vencido" ? "vencido" : "pendiente";
+      return { ...payment, amount, paidAmount, status };
+    });
     const primary = journalAccesses[0];
     const submitter = (event.nativeEvent as SubmitEvent).submitter as HTMLElement | null;
     onSave({
@@ -507,6 +624,7 @@ function RecordModal({
       apcValue: draft.hasApc ? Math.max(0, Number(draft.apcValue) || 0) : 0,
       journalAccesses,
       driveFiles,
+      clientPayments,
       journal: primary?.journal || "",
       journalLink: primary?.journalLink || "",
       loginLink: primary?.loginLink || "",
@@ -538,34 +656,46 @@ function RecordModal({
             <div className="record-section-heading"><div><span>01</span><h3>Datos del cliente</h3></div><p>Identificación y contacto del titular del contrato.</p></div>
             <div className="form-grid three-cols">
               <label>Cliente *<input value={draft.client} onChange={(event) => set("client", event.target.value)} required /></label>
-              <label>Cédula / identificación<input value={draft.clientId} onChange={(event) => set("clientId", event.target.value)} /></label>
+              <label>Cédula / identificación<input inputMode="numeric" placeholder="Ej. 0001234567" value={draft.clientId} onChange={(event) => set("clientId", event.target.value)} /></label>
               <label>Institución / empresa<input value={draft.clientInstitution} onChange={(event) => set("clientInstitution", event.target.value)} /></label>
               <label>Correo<input type="email" value={draft.clientEmail} onChange={(event) => set("clientEmail", event.target.value)} /></label>
               <label>Teléfono<input value={draft.clientPhone} onChange={(event) => set("clientPhone", event.target.value)} /></label>
               <label>Dirección<input value={draft.clientAddress} onChange={(event) => set("clientAddress", event.target.value)} /></label>
             </div>
+            <p className="field-help">Los documentos, contratos, órdenes y facturas se guardan como texto para conservar ceros a la izquierda.</p>
           </section>
 
           <section className="record-section">
-            <div className="record-section-heading"><div><span>02</span><h3>Contrato y proceso</h3></div><p>Todos los contratos deben registrar su periodo de vigencia.</p></div>
+            <div className="record-section-heading"><div><span>02</span><h3>Ventas y origen del cliente</h3></div><p>Responsable comercial, canal de captación y clasificación del cliente.</p></div>
             <div className="form-grid three-cols">
-              <label>N.º de contrato<input value={draft.contractNumber} onChange={(event) => set("contractNumber", event.target.value)} /></label>
-              <label>Inicio del contrato *<input type="date" value={draft.contractStartDate} onChange={(event) => set("contractStartDate", event.target.value)} required /></label>
-              <label>Fin del contrato *<input type="date" value={draft.contractEndDate} min={draft.contractStartDate} onChange={(event) => set("contractEndDate", event.target.value)} required /></label>
-              <label className="span-2">Link del contrato<input type="url" value={draft.contractLink} onChange={(event) => set("contractLink", event.target.value)} placeholder="https://drive.google.com/..." /></label>
-              <label>Orden de producción<input value={draft.productionOrder} onChange={(event) => set("productionOrder", event.target.value)} /></label>
-              <label className="span-3">Tema / título<textarea value={draft.topic} onChange={(event) => set("topic", event.target.value)} rows={3} /></label>
-              <label>Producto *<select value={draft.product} onChange={(event) => set("product", event.target.value)} required><option value="">Seleccione…</option>{draft.product && !PRODUCT_OPTIONS.includes(draft.product) && <option value={draft.product}>{draft.product} (importado)</option>}{PRODUCT_OPTIONS.map((value) => <option key={value}>{value}</option>)}</select></label>
-              <label>Estado editorial *<select value={draft.status} onChange={(event) => set("status", event.target.value)} required>{draft.status && !EDITORIAL_STATUS_OPTIONS.includes(draft.status) && <option value={draft.status}>{draft.status} (importado)</option>}{EDITORIAL_STATUS_OPTIONS.map((value) => <option key={value}>{value}</option>)}</select></label>
-              <label>Prioridad operativa<select value={draft.operationalStatus} onChange={(event) => set("operationalStatus", event.target.value as EditorialRecord["operationalStatus"])}>{OPERATIONAL_OPTIONS.map((value) => <option key={value}>{value}</option>)}</select></label>
-              <label>Inicio del proceso<input type="date" value={draft.startDate} onChange={(event) => set("startDate", event.target.value)} /></label>
-              <label>Fin del proceso<input type="date" value={draft.endDate} min={draft.startDate} onChange={(event) => set("endDate", event.target.value)} /></label>
-              <label>Porcentaje de avance<div className="range-field"><input type="range" min="0" max="100" value={draft.progress} onChange={(event) => set("progress", Number(event.target.value))} /><strong>{draft.progress}%</strong></div></label>
+              <label>Tipo de cliente<select value={draft.clientType} onChange={(event) => set("clientType", event.target.value)}>{CLIENT_TYPE_OPTIONS.map((value) => <option key={value}>{value}</option>)}</select></label>
+              <label>Vendedor<input value={draft.seller} onChange={(event) => set("seller", event.target.value)} placeholder="Nombre del vendedor" /></label>
+              <label>Canal de venta<select value={draft.salesChannel} onChange={(event) => set("salesChannel", event.target.value)}><option value="">Seleccione…</option>{SALES_CHANNEL_OPTIONS.map((value) => <option key={value}>{value}</option>)}</select></label>
+              <label>Fecha de venta<input type="date" value={draft.saleDate} onChange={(event) => set("saleDate", event.target.value)} /></label>
+              <label className="span-2">Información de ventas<textarea rows={3} value={draft.salesNotes} onChange={(event) => set("salesNotes", event.target.value)} placeholder="Campaña, recomendador, condiciones comerciales u observaciones" /></label>
             </div>
           </section>
 
           <section className="record-section">
-            <div className="record-section-heading"><div><span>03</span><h3>Investigadores e historial del proceso</h3></div><p>Cada asignación conserva responsable, periodo y exactamente dos abonos.</p></div>
+            <div className="record-section-heading"><div><span>03</span><h3>Contrato y proceso</h3></div><p>La fecha de inicio es obligatoria; la fecha de finalización puede dejarse pendiente.</p></div>
+            <div className="form-grid three-cols">
+              <label>N.º de contrato<input inputMode="numeric" placeholder="Ej. 000150" value={draft.contractNumber} onChange={(event) => set("contractNumber", event.target.value)} /></label>
+              <label>Inicio del contrato *<input type="date" value={draft.contractStartDate} onChange={(event) => set("contractStartDate", event.target.value)} required /></label>
+              <label>Fin del contrato (opcional)<input type="date" value={draft.contractEndDate} min={draft.contractStartDate} onChange={(event) => set("contractEndDate", event.target.value)} /></label>
+              <label className="span-2">Link del contrato<input type="url" value={draft.contractLink} onChange={(event) => set("contractLink", event.target.value)} placeholder="https://drive.google.com/..." /></label>
+              <label>Orden de producción<input inputMode="numeric" placeholder="Ej. 000045" value={draft.productionOrder} onChange={(event) => set("productionOrder", event.target.value)} /></label>
+              <label className="span-3">Tema / título<textarea value={draft.topic} onChange={(event) => set("topic", event.target.value)} rows={3} /></label>
+              <label>Producto *<select value={draft.product} onChange={(event) => set("product", event.target.value)} required><option value="">Seleccione…</option>{draft.product && !PRODUCT_OPTIONS.includes(draft.product) && <option value={draft.product}>{draft.product} (importado)</option>}{PRODUCT_OPTIONS.map((value) => <option key={value}>{value}</option>)}</select></label>
+              <label>Estado editorial *<select value={draft.status} onChange={(event) => { const status = event.target.value; setDraft((current) => ({ ...current, status, progress: status === "Espera del cliente" ? current.progress : statusProgress(status) })); }} required>{draft.status && !EDITORIAL_STATUS_OPTIONS.includes(draft.status) && <option value={draft.status}>{draft.status} (importado)</option>}{EDITORIAL_STATUS_OPTIONS.map((value) => <option key={value} value={value}>{value}{value === "Por asignar" || value === "Pendiente" ? " · 0%" : value === "Elaboración" ? " · 25%" : value === "Enviado a la revista" ? " · 50%" : value === "Revisión Pares" ? " · 75%" : value === "Publicado" || value === "Finalizado" ? " · 100%" : ""}</option>)}</select></label>
+              <label>Prioridad operativa<select value={draft.operationalStatus} onChange={(event) => set("operationalStatus", event.target.value as EditorialRecord["operationalStatus"])}>{OPERATIONAL_OPTIONS.map((value) => <option key={value}>{value}</option>)}</select></label>
+              <label>Inicio del proceso<input type="date" value={draft.startDate} onChange={(event) => set("startDate", event.target.value)} /></label>
+              <label>Fin del proceso<input type="date" value={draft.endDate} min={draft.startDate} onChange={(event) => set("endDate", event.target.value)} /></label>
+              <label>Porcentaje de avance<div className="range-field"><input type="range" min="0" max="100" value={draft.progress} disabled /><strong>{draft.progress}%</strong></div></label>
+            </div>
+          </section>
+
+          <section className="record-section">
+            <div className="record-section-heading"><div><span>04</span><h3>Investigadores e historial del proceso</h3></div><p>Cada asignación conserva responsable, periodo y modalidad de pago.</p></div>
             <div className="section-heading"><div><h3>Historial de asignaciones</h3><p>Al cambiar de responsable, agregue otra asignación; las anteriores no se reemplazan.</p></div><button type="button" className="button secondary small" onClick={addAssignment}><Plus size={15} /> Añadir investigador</button></div>
             {investigators.length === 0 && <p className="field-help assignment-help">Registre primero al equipo desde el módulo Investigadores. Puede dejar el proceso en estado “Por asignar”.</p>}
             <div className="assignment-history-editor">
@@ -576,15 +706,16 @@ function RecordModal({
                   <label>Investigador *<select value={assignment.investigator} onChange={(event) => updateAssignment(assignment.id, { investigator: event.target.value })}><option value="">Seleccione…</option>{investigatorNames.map((value) => <option key={value}>{value}</option>)}</select></label>
                   <label>Inicio de asignación *<input type="date" value={assignment.startDate} onChange={(event) => updateAssignment(assignment.id, { startDate: event.target.value })} /></label>
                   <label>Fin de asignación *<input type="date" min={assignment.startDate} value={assignment.endDate} onChange={(event) => updateAssignment(assignment.id, { endDate: event.target.value })} /></label>
-                  <label>Honorario acordado (USD)<input type="number" min="0" step="0.01" value={assignment.agreedPayment} onChange={(event) => updateAssignmentPayment(assignment.id, Number(event.target.value))} /></label>
-                  <label className="span-2">Observación de la asignación<input value={assignment.notes} onChange={(event) => updateAssignment(assignment.id, { notes: event.target.value })} placeholder="Motivo de cambio, alcance u observación" /></label>
+                  <label>Modalidad de pago<select value={assignment.paymentMode} onChange={(event) => updateAssignmentPaymentMode(assignment.id, event.target.value as InvestigatorAssignment["paymentMode"])}><option value="dos_abonos">Dos abonos</option><option value="unico">Pago único</option></select></label>
+                  <label>Honorario acordado (USD)<DecimalInput value={assignment.agreedPayment} onValue={(value) => updateAssignmentPayment(assignment.id, value)} /></label>
+                  <label>Observación de la asignación<input value={assignment.notes} onChange={(event) => updateAssignment(assignment.id, { notes: event.target.value })} placeholder="Motivo de cambio, alcance u observación" /></label>
                 </div>
                 <div className="investigator-installments">
-                  {assignment.installments.map((installment) => <div className="installment-card" key={installment.number}>
-                    <div className="installment-title"><span>Abono {installment.number} de 2</span><strong>{formatCurrency(installment.paidAmount)} / {formatCurrency(installment.amount)}</strong></div>
+                  {assignment.installments.filter((installment) => assignment.paymentMode !== "unico" || installment.number === 1).map((installment) => <div className="installment-card" key={installment.number}>
+                    <div className="installment-title"><span>{assignment.paymentMode === "unico" ? "Pago único" : `Abono ${installment.number} de 2`}</span><strong>{formatCurrency(installment.paidAmount)} / {formatCurrency(installment.amount)}</strong></div>
                     <div className="form-grid three-cols">
-                      <label>Valor previsto<input type="number" min="0" step="0.01" value={installment.amount} onChange={(event) => updateInstallment(assignment.id, installment.number, { amount: Number(event.target.value) })} /></label>
-                      <label>Valor pagado<input type="number" min="0" step="0.01" value={installment.paidAmount} onChange={(event) => { const paidAmount = Number(event.target.value); updateInstallment(assignment.id, installment.number, { paidAmount, status: paidAmount <= 0 ? "pendiente" : paidAmount >= installment.amount ? "pagado" : "parcial" }); }} /></label>
+                      <label>Valor previsto<DecimalInput value={installment.amount} onValue={(amount) => updateInstallment(assignment.id, installment.number, { amount })} /></label>
+                      <label>Valor pagado<DecimalInput value={installment.paidAmount} onValue={(paidAmount) => updateInstallment(assignment.id, installment.number, { paidAmount, status: paidAmount <= 0 ? "pendiente" : paidAmount >= installment.amount ? "pagado" : "parcial" })} /></label>
                       <label>Estado<select value={installment.status} onChange={(event) => { const status = event.target.value as InvestigatorInstallment["status"]; updateInstallment(assignment.id, installment.number, { status, paidAmount: status === "pagado" ? installment.amount : status === "pendiente" ? 0 : installment.paidAmount, paidDate: status === "pagado" ? installment.paidDate || new Date().toISOString().slice(0, 10) : status === "pendiente" ? "" : installment.paidDate }); }}><option value="pendiente">Pendiente</option><option value="parcial">Parcial</option><option value="pagado">Pagado</option></select></label>
                       <label>Fecha prevista<input type="date" value={installment.scheduledDate} onChange={(event) => updateInstallment(assignment.id, installment.number, { scheduledDate: event.target.value })} /></label>
                       <label>Fecha pagada<input type="date" value={installment.paidDate} onChange={(event) => updateInstallment(assignment.id, installment.number, { paidDate: event.target.value })} /></label>
@@ -596,12 +727,12 @@ function RecordModal({
           </section>
 
           <section className="record-section">
-            <div className="record-section-heading"><div><span>04</span><h3>Indexación, revistas y APC</h3></div><p>Puede registrar varias revistas y credenciales dentro del mismo proceso.</p></div>
+            <div className="record-section-heading"><div><span>05</span><h3>Indexación, revistas y APC</h3></div><p>Puede registrar varias revistas y credenciales dentro del mismo proceso.</p></div>
             <div className="form-grid three-cols">
               <label>Indexación *<select value={draft.indexation} onChange={(event) => set("indexation", event.target.value)} required><option value="">Seleccione…</option>{draft.indexation && !INDEXATION_OPTIONS.includes(draft.indexation) && <option value={draft.indexation}>{draft.indexation} (importada)</option>}{INDEXATION_OPTIONS.map((value) => <option key={value}>{value}</option>)}</select></label>
               <label>Fecha de aceptación<input type="date" value={draft.acceptanceDate} onChange={(event) => set("acceptanceDate", event.target.value)} /></label>
               <label className="apc-toggle"><span>APC</span><span className="toggle-row"><input type="checkbox" checked={draft.hasApc} onChange={(event) => { set("hasApc", event.target.checked); if (!event.target.checked) set("apcValue", 0); }} /><strong>{draft.hasApc ? "Con APC" : "Sin APC"}</strong></span></label>
-              {draft.hasApc && <label>Valor APC (USD)<input type="number" min="0" step="0.01" value={draft.apcValue} onChange={(event) => set("apcValue", Number(event.target.value))} /></label>}
+              {draft.hasApc && <label>Valor APC (USD)<DecimalInput value={draft.apcValue} onValue={(value) => set("apcValue", value)} /></label>}
             </div>
             <div className="section-heading"><div><h3>Revistas y accesos</h3><p>Agregue una fila por cada revista utilizada.</p></div><button type="button" className="button secondary small" onClick={() => setDraft((current) => ({ ...current, journalAccesses: [...current.journalAccesses, blankJournalAccess()] }))}><Plus size={15} /> Añadir revista</button></div>
             <div className="journal-editor">
@@ -618,17 +749,17 @@ function RecordModal({
           </section>
 
           <section className="record-section">
-            <div className="record-section-heading"><div><span>05</span><h3>Control contable y factura del investigador</h3></div><p>Cartera del cliente, honorarios y soporte de facturación.</p></div>
+            <div className="record-section-heading"><div><span>06</span><h3>Control contable y factura del investigador</h3></div><p>El saldo se calcula con los valores efectivamente pagados y nunca queda pendiente cuando el total está cubierto.</p></div>
             <div className="form-grid three-cols">
-              <label>Total contratado al cliente (USD)<input type="number" min="0" step="0.01" value={draft.clientTotal} onChange={(event) => set("clientTotal", Number(event.target.value))} /></label>
-              <label>Saldo pendiente confirmado (USD)<input type="number" min="0" step="0.01" value={draft.outstandingBalance || 0} onChange={(event) => set("outstandingBalance", Number(event.target.value))} /></label>
+              <label>Total contratado al cliente (USD)<DecimalInput value={draft.clientTotal} onValue={(value) => set("clientTotal", value)} /></label>
+              <label>Saldo pendiente confirmado (USD)<DecimalInput value={draft.outstandingBalance || 0} onValue={(value) => set("outstandingBalance", value)} /></label>
               <div className="mini-balance"><span>Saldo calculado</span><strong>{formatCurrency(clientBalance(draft))}</strong></div>
-              <label>Próximo pago esperado (USD)<input type="number" min="0" step="0.01" value={draft.nextPaymentAmount} onChange={(event) => set("nextPaymentAmount", Number(event.target.value))} /></label>
+              <label>Próximo pago esperado (USD)<DecimalInput value={draft.nextPaymentAmount} onValue={(value) => set("nextPaymentAmount", value)} /></label>
               <label>Fecha del próximo pago<input type="date" value={draft.nextPaymentDate} onChange={(event) => set("nextPaymentDate", event.target.value)} /></label>
               <span />
-              <label>N.º de factura del investigador<input value={draft.investigatorInvoiceNumber} onChange={(event) => set("investigatorInvoiceNumber", event.target.value)} /></label>
+              <label>N.º de factura del investigador<input inputMode="numeric" placeholder="Ej. 000025" value={draft.investigatorInvoiceNumber} onChange={(event) => set("investigatorInvoiceNumber", event.target.value)} /></label>
               <label>Fecha de factura<input type="date" value={draft.investigatorInvoiceDate} onChange={(event) => set("investigatorInvoiceDate", event.target.value)} /></label>
-              <label>Valor facturado (USD)<input type="number" min="0" step="0.01" value={draft.investigatorInvoiceValue} onChange={(event) => set("investigatorInvoiceValue", Number(event.target.value))} /></label>
+              <label>Valor facturado (USD)<DecimalInput value={draft.investigatorInvoiceValue} onValue={(value) => set("investigatorInvoiceValue", value)} /></label>
               <label className="span-2">Link de factura<input type="url" value={draft.investigatorInvoiceLink} onChange={(event) => set("investigatorInvoiceLink", event.target.value)} placeholder="https://drive.google.com/..." /></label>
               <label>Estado de factura<select value={draft.investigatorInvoiceStatus} onChange={(event) => set("investigatorInvoiceStatus", event.target.value)}><option>Pendiente</option><option>Emitida</option><option>Pagada</option><option>Anulada</option></select></label>
             </div>
@@ -637,16 +768,17 @@ function RecordModal({
               {draft.clientPayments.length === 0 && <p className="muted center">No existen pagos registrados.</p>}
               {draft.clientPayments.map((payment) => <div className="payment-row" key={payment.id}>
                 <input aria-label="Concepto" value={payment.concept} onChange={(event) => updatePayment(payment.id, { concept: event.target.value })} />
-                <input aria-label="Monto" type="number" min="0" step="0.01" value={payment.amount} onChange={(event) => updatePayment(payment.id, { amount: Number(event.target.value) })} />
+                <DecimalInput ariaLabel="Valor previsto" value={payment.amount} onValue={(amount) => updatePayment(payment.id, { amount, paidAmount: payment.status === "pagado" ? amount : payment.paidAmount })} />
+                <DecimalInput ariaLabel="Valor pagado" value={payment.paidAmount} onValue={(paidAmount) => updatePayment(payment.id, { paidAmount, status: paidAmount <= 0 ? "pendiente" : payment.amount > 0 && paidAmount >= payment.amount ? "pagado" : "parcial", paidDate: paidAmount > 0 ? payment.paidDate || new Date().toISOString().slice(0, 10) : "" })} />
                 <input aria-label="Fecha prevista" type="date" value={payment.scheduledDate} onChange={(event) => updatePayment(payment.id, { scheduledDate: event.target.value })} />
-                <select aria-label="Estado" value={payment.status} onChange={(event) => updatePayment(payment.id, { status: event.target.value as ClientPayment["status"], paidDate: event.target.value === "pagado" ? payment.paidDate || new Date().toISOString().slice(0, 10) : payment.paidDate })}><option value="pendiente">Pendiente</option><option value="parcial">Parcial</option><option value="pagado">Pagado</option><option value="vencido">Vencido</option></select>
+                <select aria-label="Estado" value={payment.status} onChange={(event) => { const status = event.target.value as ClientPayment["status"]; updatePayment(payment.id, { status, paidAmount: status === "pagado" ? payment.amount : status === "pendiente" || status === "vencido" ? 0 : payment.paidAmount, paidDate: status === "pagado" || status === "parcial" ? payment.paidDate || new Date().toISOString().slice(0, 10) : "" }); }}><option value="pendiente">Pendiente</option><option value="parcial">Parcial</option><option value="pagado">Pagado</option><option value="vencido">Vencido</option></select>
                 <button type="button" className="icon-button danger" onClick={() => removePayment(payment.id)}><Trash2 size={16} /></button>
               </div>)}
             </div>
           </section>
 
           <section className="record-section">
-            <div className="record-section-heading"><div><span>06</span><h3>Archivos de Google Drive</h3></div><p>Enlaces de contratos, facturas, artículos, cartas y otros respaldos.</p></div>
+            <div className="record-section-heading"><div><span>07</span><h3>Archivos de Google Drive</h3></div><p>Enlaces de contratos, facturas, artículos, cartas y otros respaldos.</p></div>
             <div className="section-heading"><div><h3>Documentos vinculados</h3><p>Los permisos dependen de la configuración de cada archivo en Drive.</p></div><button type="button" className="button secondary small" onClick={() => setDraft((current) => ({ ...current, driveFiles: [...current.driveFiles, blankDriveFile()] }))}><Plus size={15} /> Añadir archivo</button></div>
             <div className="drive-editor">
               {draft.driveFiles.length === 0 && <p className="muted center">No existen archivos vinculados.</p>}
@@ -663,7 +795,7 @@ function RecordModal({
           </section>
 
           <section className="record-section">
-            <div className="record-section-heading"><div><span>07</span><h3>Observaciones y trazabilidad</h3></div><p>Notas internas y procedencia del registro.</p></div>
+            <div className="record-section-heading"><div><span>08</span><h3>Observaciones y trazabilidad</h3></div><p>Notas internas y procedencia del registro.</p></div>
             <div className="form-grid">
               <label className="span-2">Observaciones<textarea value={draft.observations} onChange={(event) => set("observations", event.target.value)} rows={4} /></label>
               <div className="privacy-note span-2"><ShieldCheck /><div><strong>Datos sensibles en Google Sheets</strong><p>Los usuarios y contraseñas se almacenan en la hoja central. Mantenga restringido el acceso.</p></div></div>
@@ -732,10 +864,11 @@ function ProcessesTable({ records, onEdit }: { records: EditorialRecord[]; onEdi
                 {show("client") && <td className="sticky-cell"><button className="client-link" onClick={() => onEdit(record)}>{record.client}<small>{record.contractNumber || "Sin contrato"}</small></button></td>}
                 {show("topic") && <td><span className="truncate-2" title={record.topic}>{record.topic || record.product || "—"}</span></td>}
                 {show("payments") && <td><strong>{formatCurrency(paidByClient(record))}</strong><small className="cell-note">de {formatCurrency(record.clientTotal)}</small></td>}
-                {show("nextPayment") && <td><strong className={daysFromToday(record.nextPaymentDate) < 0 ? "text-danger" : ""}>{formatCurrency(record.nextPaymentAmount || clientBalance(record))}</strong><small className="cell-note">{formatDate(record.nextPaymentDate)}</small></td>}
+                {show("nextPayment") && <td><strong className={clientBalance(record) > 0 && daysFromToday(record.nextPaymentDate) < 0 ? "text-danger" : ""}>{formatCurrency(clientBalance(record) <= 0 ? 0 : Math.min(record.nextPaymentAmount || clientBalance(record), clientBalance(record)))}</strong><small className="cell-note">{clientBalance(record) <= 0 ? "Pagado · saldo $0" : formatDate(record.nextPaymentDate)}</small></td>}
                 {show("indexation") && <td><span className="soft-tag">{record.indexation || "Sin definir"}</span></td>}
                 {show("status") && <td><span className={`status-pill ${statusClass(record.status)}`}>{record.status || "Pendiente"}</span></td>}
                 {show("priority") && <td><span className={`priority-pill ${normalizeText(record.operationalStatus).toLowerCase().replace(/\s+/g, "-")}`}>{record.operationalStatus}</span></td>}
+                {show("sales") && <td><span>{record.seller || "Sin vendedor"}</span><small className="cell-note">{record.salesChannel || record.clientType || "—"}</small></td>}
                 {show("credentials") && <td><span className="secret-cell">{record.username || "—"}<small>{record.password ? "••••••••" : "Sin contraseña"}</small></span></td>}
                 {show("journal") && <td>{record.journal || "—"}</td>}
                 {show("link") && <td>{record.journalLink ? <a className="link-button" href={record.journalLink} target="_blank" rel="noreferrer"><Link2 size={15} /> Abrir</a> : "—"}</td>}
@@ -778,6 +911,37 @@ function Dashboard({ records, onEdit, onNavigate }: { records: EditorialRecord[]
     records.forEach((record) => grouped.set(record.investigator || "Sin asignar", (grouped.get(record.investigator || "Sin asignar") || 0) + clientBalance(record)));
     return Array.from(grouped, ([name, value]) => ({ name: name.split(" ")[0], fullName: name, value })).sort((a, b) => b.value - a.value).slice(0, 8);
   }, [records]);
+  const productData = useMemo(() => {
+    const grouped = new Map<string, number>();
+    records.forEach((record) => grouped.set(record.product || "Sin definir", (grouped.get(record.product || "Sin definir") || 0) + 1));
+    return Array.from(grouped, ([name, value]) => ({ name, value })).sort((a, b) => b.value - a.value);
+  }, [records]);
+  const indexationData = useMemo(() => {
+    const grouped = new Map<string, number>();
+    records.forEach((record) => grouped.set(record.indexation || "Sin definir", (grouped.get(record.indexation || "Sin definir") || 0) + 1));
+    return Array.from(grouped, ([name, value]) => ({ name, value })).sort((a, b) => b.value - a.value);
+  }, [records]);
+  const salesChannelData = useMemo(() => {
+    const grouped = new Map<string, number>();
+    records.forEach((record) => grouped.set(record.salesChannel || "Sin registrar", (grouped.get(record.salesChannel || "Sin registrar") || 0) + 1));
+    return Array.from(grouped, ([name, value]) => ({ name, value })).sort((a, b) => b.value - a.value);
+  }, [records]);
+  const clientTypeData = useMemo(() => {
+    const clients = new Map<string, EditorialRecord>();
+    records.forEach((record) => clients.set(normalizeText(record.client).toUpperCase() || record.id, record));
+    const grouped = new Map<string, number>();
+    clients.forEach((record) => grouped.set(record.clientType || "Existente", (grouped.get(record.clientType || "Existente") || 0) + 1));
+    return Array.from(grouped, ([name, value]) => ({ name, value })).sort((a, b) => b.value - a.value);
+  }, [records]);
+  const sellerData = useMemo(() => {
+    const grouped = new Map<string, number>();
+    records.forEach((record) => grouped.set(record.seller || "Sin registrar", (grouped.get(record.seller || "Sin registrar") || 0) + record.clientTotal));
+    return Array.from(grouped, ([name, value]) => ({ name, value })).sort((a, b) => b.value - a.value).slice(0, 8);
+  }, [records]);
+  const paymentData = useMemo(() => [
+    { name: "Pagado", value: metrics.paid },
+    { name: "Pendiente", value: metrics.balance },
+  ].filter((item) => item.value > 0), [metrics.paid, metrics.balance]);
   const recentRisk = [...metrics.overdue].sort((a, b) => daysFromToday(a.nextPaymentDate || a.endDate) - daysFromToday(b.nextPaymentDate || b.endDate)).slice(0, 5);
   return (
     <div className="view-stack">
@@ -795,6 +959,32 @@ function Dashboard({ records, onEdit, onNavigate }: { records: EditorialRecord[]
         <article className="panel chart-panel">
           <div className="panel-heading"><div><span className="eyebrow">CARTERA</span><h3>Saldo por investigador</h3></div><button className="text-button" onClick={() => onNavigate("investigators")}>Ver equipo</button></div>
           {investigatorData.length ? <div className="bar-chart"><ResponsiveContainer width="100%" height="100%"><BarChart data={investigatorData} margin={{ left: 0, right: 8, top: 10, bottom: 0 }}><CartesianGrid vertical={false} stroke="#e7e4dc" /><XAxis dataKey="name" tickLine={false} axisLine={false} fontSize={11} /><YAxis tickFormatter={(value) => `$${Math.round(value / 1000)}k`} tickLine={false} axisLine={false} fontSize={11} width={42} /><Tooltip formatter={(value) => [formatCurrency(Number(value)), "Saldo"]} labelFormatter={(_, payload) => payload?.[0]?.payload?.fullName || ""} /><Bar dataKey="value" fill="#2f8f7f" radius={[6, 6, 0, 0]} /></BarChart></ResponsiveContainer></div> : <EmptyState title="Sin saldos" text="Añade valores de contrato y pagos para ver la cartera." />}
+        </article>
+      </section>
+      <section className="dashboard-grid dashboard-extra-grid">
+        <article className="panel chart-panel">
+          <div className="panel-heading"><div><span className="eyebrow">PRODUCTOS</span><h3>Procesos por producto</h3></div><span className="count-chip">{productData.length}</span></div>
+          {productData.length ? <div className="distribution-chart"><ResponsiveContainer width="100%" height="100%"><BarChart data={productData} layout="vertical" margin={{ left: 10, right: 24 }}><CartesianGrid horizontal={false} stroke="#ece8df" /><XAxis type="number" allowDecimals={false} axisLine={false} tickLine={false} /><YAxis type="category" dataKey="name" width={112} axisLine={false} tickLine={false} fontSize={11} /><Tooltip formatter={(value) => [`${value} procesos`, "Cantidad"]} /><Bar dataKey="value" fill="#2f8f7f" radius={[0, 6, 6, 0]} /></BarChart></ResponsiveContainer></div> : <EmptyState title="Sin productos" text="Los productos registrados aparecerán aquí." />}
+        </article>
+        <article className="panel chart-panel">
+          <div className="panel-heading"><div><span className="eyebrow">INDEXACIONES</span><h3>Procesos por indexación</h3></div><span className="count-chip">{indexationData.length}</span></div>
+          {indexationData.length ? <div className="distribution-chart"><ResponsiveContainer width="100%" height="100%"><BarChart data={indexationData} layout="vertical" margin={{ left: 10, right: 24 }}><CartesianGrid horizontal={false} stroke="#ece8df" /><XAxis type="number" allowDecimals={false} axisLine={false} tickLine={false} /><YAxis type="category" dataKey="name" width={112} axisLine={false} tickLine={false} fontSize={11} /><Tooltip formatter={(value) => [`${value} procesos`, "Cantidad"]} /><Bar dataKey="value" fill="#5d7fa3" radius={[0, 6, 6, 0]} /></BarChart></ResponsiveContainer></div> : <EmptyState title="Sin indexaciones" text="Las indexaciones registradas aparecerán aquí." />}
+        </article>
+        <article className="panel chart-panel">
+          <div className="panel-heading"><div><span className="eyebrow">VENTAS</span><h3>Origen de los procesos</h3></div><button className="text-button" onClick={() => onNavigate("clients")}>Ver clientes</button></div>
+          {salesChannelData.length ? <div className="chart-layout"><div className="chart-box"><ResponsiveContainer width="100%" height="100%"><PieChart><Pie data={salesChannelData} dataKey="value" nameKey="name" innerRadius={55} outerRadius={84} paddingAngle={3}>{salesChannelData.map((_, index) => <Cell key={index} fill={PIE_COLORS[index % PIE_COLORS.length]} />)}</Pie><Tooltip formatter={(value) => [`${value} procesos`, "Cantidad"]} /></PieChart></ResponsiveContainer><div className="donut-center"><strong>{records.length}</strong><span>ventas</span></div></div><div className="chart-legend">{salesChannelData.map((item, index) => <div key={item.name}><i style={{ background: PIE_COLORS[index % PIE_COLORS.length] }} /><span>{item.name}</span><strong>{item.value}</strong></div>)}</div></div> : <EmptyState title="Sin canales" text="Registre el canal de venta en cada proceso." />}
+        </article>
+        <article className="panel chart-panel">
+          <div className="panel-heading"><div><span className="eyebrow">CLIENTES</span><h3>Tipo de cliente</h3></div><button className="text-button" onClick={() => onNavigate("clients")}>Ver clientes</button></div>
+          {clientTypeData.length ? <div className="chart-layout"><div className="chart-box"><ResponsiveContainer width="100%" height="100%"><PieChart><Pie data={clientTypeData} dataKey="value" nameKey="name" innerRadius={55} outerRadius={84} paddingAngle={3}>{clientTypeData.map((_, index) => <Cell key={index} fill={PIE_COLORS[(index + 2) % PIE_COLORS.length]} />)}</Pie><Tooltip formatter={(value) => [`${value} clientes`, "Cantidad"]} /></PieChart></ResponsiveContainer><div className="donut-center"><strong>{clientTypeData.reduce((sum, item) => sum + item.value, 0)}</strong><span>clientes</span></div></div><div className="chart-legend">{clientTypeData.map((item, index) => <div key={item.name}><i style={{ background: PIE_COLORS[(index + 2) % PIE_COLORS.length] }} /><span>{item.name}</span><strong>{item.value}</strong></div>)}</div></div> : <EmptyState title="Sin clientes" text="Los tipos de cliente aparecerán aquí." />}
+        </article>
+        <article className="panel chart-panel">
+          <div className="panel-heading"><div><span className="eyebrow">VENDEDORES</span><h3>Valor contratado por vendedor</h3></div><span className="count-chip">{sellerData.length}</span></div>
+          {sellerData.length ? <div className="distribution-chart"><ResponsiveContainer width="100%" height="100%"><BarChart data={sellerData} layout="vertical" margin={{ left: 10, right: 24 }}><CartesianGrid horizontal={false} stroke="#ece8df" /><XAxis type="number" tickFormatter={(value) => `$${Math.round(value / 1000)}k`} axisLine={false} tickLine={false} /><YAxis type="category" dataKey="name" width={112} axisLine={false} tickLine={false} fontSize={11} /><Tooltip formatter={(value) => [formatCurrency(Number(value)), "Contratado"]} /><Bar dataKey="value" fill="#e3aa3d" radius={[0, 6, 6, 0]} /></BarChart></ResponsiveContainer></div> : <EmptyState title="Sin vendedores" text="Registre el vendedor de cada contrato." />}
+        </article>
+        <article className="panel chart-panel">
+          <div className="panel-heading"><div><span className="eyebrow">PAGOS</span><h3>Pagado frente a pendiente</h3></div><button className="text-button" onClick={() => onNavigate("portfolio")}>Ver cartera</button></div>
+          {paymentData.length ? <div className="chart-layout"><div className="chart-box"><ResponsiveContainer width="100%" height="100%"><PieChart><Pie data={paymentData} dataKey="value" nameKey="name" innerRadius={55} outerRadius={84} paddingAngle={3}>{paymentData.map((_, index) => <Cell key={index} fill={index === 0 ? "#2f8f7f" : "#d66d5d"} />)}</Pie><Tooltip formatter={(value) => [formatCurrency(Number(value)), "Valor"]} /></PieChart></ResponsiveContainer><div className="donut-center"><strong>{metrics.contracted ? Math.min(100, Math.round(metrics.paid / metrics.contracted * 100)) : 0}%</strong><span>cobrado</span></div></div><div className="chart-legend">{paymentData.map((item, index) => <div key={item.name}><i style={{ background: index === 0 ? "#2f8f7f" : "#d66d5d" }} /><span>{item.name}</span><strong>{formatCurrency(item.value)}</strong></div>)}</div></div> : <EmptyState title="Sin valores" text="Registre valores contratados y pagos." />}
         </article>
       </section>
       <section className="panel">
@@ -848,13 +1038,13 @@ function ClientsView({ records, onEdit, onNewContract }: {
     });
     return [...grouped.values()].map((items) => {
       const sorted = [...items].sort((a, b) => Date.parse(b.updatedAt || "") - Date.parse(a.updatedAt || ""));
-      const profile = sorted.find((item) => item.clientEmail || item.clientPhone || item.clientId || item.clientInstitution) || sorted[0];
+      const profile = sorted.find((item) => item.clientEmail || item.clientPhone || item.clientId || item.clientInstitution || item.seller || item.salesChannel) || sorted[0];
       return {
         profile,
         records: sorted,
         total: sorted.reduce((sum, item) => sum + item.clientTotal, 0),
         balance: sorted.reduce((sum, item) => sum + clientBalance(item), 0),
-        active: sorted.filter((item) => statusBucket(item.status) !== "Finalizado").length,
+        active: sorted.filter((item) => !["Finalizado", "Publicado"].includes(statusBucket(item.status))).length,
       };
     }).sort((a, b) => a.profile.client.localeCompare(b.profile.client, "es"));
   }, [records]);
@@ -865,6 +1055,9 @@ function ClientsView({ records, onEdit, onNewContract }: {
     client.profile.clientEmail,
     client.profile.clientPhone,
     client.profile.clientInstitution,
+    client.profile.clientType,
+    client.profile.seller,
+    client.profile.salesChannel,
     ...client.records.map((record) => record.contractNumber),
   ].join(" ")).toUpperCase().includes(query));
 
@@ -874,8 +1067,8 @@ function ClientsView({ records, onEdit, onNewContract }: {
       <div className="table-search client-search"><Search size={17} /><input value={search} onChange={(event) => setSearch(event.target.value)} placeholder="Buscar cliente, documento o contrato…" />{search && <button onClick={() => setSearch("")}><X size={15} /></button>}</div>
     </section>
     {visible.length ? <div className="client-catalog-grid">{visible.map((client) => <article className="client-profile-card" key={normalizeText(client.profile.client).toUpperCase()}>
-      <header><div className="client-avatar">{client.profile.client.split(" ").slice(0, 2).map((part) => part[0]).join("")}</div><div><h3>{client.profile.client}</h3><p>{client.profile.clientInstitution || "Cliente particular"}</p><span>{client.profile.clientId || "Sin identificación"}</span></div><button className="button primary small" onClick={() => onNewContract(client.profile)}><Plus size={15} /> Nuevo contrato</button></header>
-      <div className="client-contact-grid"><span><b>Correo</b>{client.profile.clientEmail || "—"}</span><span><b>Teléfono</b>{client.profile.clientPhone || "—"}</span><span><b>Dirección</b>{client.profile.clientAddress || "—"}</span></div>
+      <header><div className="client-avatar">{client.profile.client.split(" ").slice(0, 2).map((part) => part[0]).join("")}</div><div><h3>{client.profile.client}</h3><p>{client.profile.clientInstitution || "Cliente particular"}</p><span>{client.profile.clientId || "Sin identificación"} · {client.profile.clientType || "Existente"}</span></div><button className="button primary small" onClick={() => onNewContract(client.profile)}><Plus size={15} /> Nuevo contrato</button></header>
+      <div className="client-contact-grid"><span><b>Correo</b>{client.profile.clientEmail || "—"}</span><span><b>Teléfono</b>{client.profile.clientPhone || "—"}</span><span><b>Vendedor / canal</b>{[client.profile.seller, client.profile.salesChannel].filter(Boolean).join(" · ") || "—"}</span></div>
       <div className="client-financial-summary"><div><span>Contratos</span><strong>{client.records.length}</strong></div><div><span>Activos</span><strong>{client.active}</strong></div><div><span>Valor total</span><strong>{formatCurrency(client.total)}</strong></div><div><span>Cartera</span><strong>{formatCurrency(client.balance)}</strong></div></div>
       <div className="client-contract-list"><strong>Contratos y procesos</strong>{client.records.map((record) => <button key={record.id} onClick={() => onEdit(record)}><span><b>{record.contractNumber || "Sin número"}</b><small>{record.topic || record.product || "Sin tema"}</small></span><span><b>{statusBucket(record.status)}</b><small>{formatDate(record.contractStartDate)} — {formatDate(record.contractEndDate)}</small></span><ProgressBar value={record.progress} compact /></button>)}</div>
     </article>)}</div> : <EmptyState title="No hay clientes coincidentes" text="Registre un proceso o cambie el texto de búsqueda." />}
@@ -1099,7 +1292,7 @@ function GoogleSheetsView({
           <div className="sheets-form">
             <label className="span-2">URL de aplicación web<input type="url" placeholder="https://script.google.com/macros/s/.../exec" value={draft.webAppUrl} onChange={(event) => setDraft({ ...draft, webAppUrl: event.target.value })} /></label>
             <label className="span-2">Clave de sincronización<input type="password" autoComplete="off" placeholder="Misma clave configurada como SYNC_SECRET" value={draft.syncToken} onChange={(event) => setDraft({ ...draft, syncToken: event.target.value })} /></label>
-            <label className="toggle-row"><input type="checkbox" checked={draft.autoSync} onChange={(event) => setDraft({ ...draft, autoSync: event.target.checked })} /><span><strong>Sincronización automática</strong><small>Concilia cambios al abrir la sesión y cada minuto.</small></span></label>
+            <label className="toggle-row"><input type="checkbox" checked={draft.autoSync} onChange={(event) => setDraft({ ...draft, autoSync: event.target.checked })} /><span><strong>Sincronización automática</strong><small>Concilia cambios al abrir la sesión y cada 20 minutos.</small></span></label>
             <label className="toggle-row sensitive"><input type="checkbox" checked={draft.includeCredentials} onChange={(event) => setDraft({ ...draft, includeCredentials: event.target.checked })} /><span><strong>Incluir usuarios y contraseñas</strong><small>Solo actívelo si la hoja es privada y de acceso restringido.</small></span></label>
           </div>
           <div className="sheets-buttons">
@@ -1180,6 +1373,7 @@ const newContractForClient = (source: EditorialRecord): EditorialRecord => ({
   clientPhone: source.clientPhone,
   clientAddress: source.clientAddress,
   clientInstitution: source.clientInstitution,
+  clientType: "Existente",
   sources: ["Nuevo contrato de cliente existente"],
 });
 
@@ -1263,7 +1457,7 @@ export default function EditorialApp() {
   useEffect(() => {
     if (!autoSync || !sheetsUrl || !sheetsToken) return;
     const initial = window.setTimeout(() => { void runGoogleSync(false); }, 2500);
-    const interval = window.setInterval(() => { void runGoogleSync(false); }, 60000);
+    const interval = window.setInterval(() => { void runGoogleSync(false); }, 20 * 60 * 1000);
     return () => {
       window.clearTimeout(initial);
       window.clearInterval(interval);
@@ -1274,7 +1468,7 @@ export default function EditorialApp() {
     if (!data) return [];
     const query = normalizeText(filters.search).toUpperCase();
     return data.records.filter((record) => {
-      const haystack = normalizeText([record.client, record.topic, record.product, record.contractNumber, record.journal, record.investigator, ...record.investigatorHistory.map((item) => item.investigator), record.status, record.operationalStatus, record.indexation, record.clientEmail, record.clientInstitution].join(" ")).toUpperCase();
+      const haystack = normalizeText([record.client, record.topic, record.product, record.contractNumber, record.journal, record.investigator, ...record.investigatorHistory.map((item) => item.investigator), record.status, record.operationalStatus, record.indexation, record.clientEmail, record.clientInstitution, record.clientType, record.seller, record.salesChannel].join(" ")).toUpperCase();
       if (query && !haystack.includes(query)) return false;
       if (filters.status && statusBucket(record.status) !== filters.status) return false;
       if (filters.investigator && !record.investigatorHistory.some((item) => item.investigator === filters.investigator)) return false;
@@ -1318,10 +1512,10 @@ export default function EditorialApp() {
     }
   };
   const saveGoogleConfig = async (config: GoogleSheetsConfig) => {
-    await persist(addAudit({ ...data, googleSheets: config, version: 5 }, "Google Sheets", "Configuración de sincronización actualizada"));
+    await persist(addAudit({ ...data, googleSheets: config, version: 6 }, "Google Sheets", "Configuración de sincronización actualizada"));
   };
   const saveInvestigators = async (investigators: Investigator[]) => {
-    await persist(addAudit({ ...data, investigators, version: 5 }, "Investigadores", `Catálogo actualizado: ${investigators.length} registros`));
+    await persist(addAudit({ ...data, investigators, version: 6 }, "Investigadores", `Catálogo actualizado: ${investigators.length} registros`));
   };
   const title = NAV_ITEMS.find((item) => item.key === view)?.label || "Control editorial";
 

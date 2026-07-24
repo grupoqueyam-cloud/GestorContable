@@ -12,7 +12,7 @@
  */
 
 const APP_NAME = "Control Editorial Sustainability";
-const SCHEMA_VERSION = 3;
+const SCHEMA_VERSION = 4;
 const PROP_SECRET = "SYNC_SECRET";
 const PROP_REVISION = "DATA_REVISION";
 const PROP_FINGERPRINT = "DATA_FINGERPRINT";
@@ -40,11 +40,12 @@ const RECORD_HEADERS = [
   "Direccion cliente", "Institucion cliente", "Factura investigador numero",
   "Factura investigador fecha", "Factura investigador valor", "Factura investigador link",
   "Factura investigador estado", "Revistas JSON", "Drive JSON", "Historial investigadores JSON",
+  "Tipo cliente", "Vendedor", "Canal venta", "Fecha venta", "Informacion ventas",
 ];
 
 const PAYMENT_HEADERS = [
   "ID pago", "ID proceso", "Cliente", "Numero contrato", "Concepto",
-  "Fecha programada", "Fecha pagada", "Valor", "Estado", "Nota",
+  "Fecha programada", "Fecha pagada", "Valor", "Estado", "Nota", "Valor pagado",
 ];
 
 const AUDIT_HEADERS = ["ID", "Fecha", "Accion", "Detalle"];
@@ -57,6 +58,7 @@ const INVESTIGATOR_HEADERS = [
 const CLIENT_HEADERS = [
   "ID cliente", "Cliente", "Documento", "Email", "Telefono", "Direccion", "Institucion",
   "Numero contratos", "Contratos activos", "Valor total", "Cartera", "Contratos JSON", "Actualizado",
+  "Tipo cliente", "Vendedor", "Canal venta", "Fecha venta",
 ];
 const INVESTIGATOR_HISTORY_HEADERS = [
   "ID asignacion", "ID proceso", "Cliente", "Numero contrato", "Investigador", "Responsable actual",
@@ -64,6 +66,7 @@ const INVESTIGATOR_HISTORY_HEADERS = [
   "Abono 1 fecha prevista", "Abono 1 fecha pagada", "Abono 1 estado", "Abono 2 previsto",
   "Abono 2 pagado", "Abono 2 fecha prevista", "Abono 2 fecha pagada", "Abono 2 estado",
   "Total pagado", "Pendiente", "Notas", "Creado", "Actualizado",
+  "Modalidad pago",
 ];
 
 function doGet() {
@@ -96,7 +99,7 @@ function doPost(e) {
 
 function configurarHojas() {
   ensureSheets();
-  migrarDatosV3();
+  migrarDatosV4();
   applyDropdownValidations();
   const properties = PropertiesService.getScriptProperties();
   if (properties.getProperty(PROP_REVISION) === null) properties.setProperty(PROP_REVISION, "0");
@@ -112,7 +115,7 @@ function onOpen() {
   SpreadsheetApp.getUi()
     .createMenu("Control Editorial")
     .addItem("Configurar hojas", "configurarHojas")
-    .addItem("Migrar datos a versión 3", "migrarDatosV3")
+    .addItem("Migrar datos a versión 4", "migrarDatosV4")
     .addItem("Ver estado", "mostrarEstado")
     .addToUi();
 }
@@ -139,8 +142,17 @@ function onEdit(e) {
       if (e.range.getColumn() !== updatedColumn) {
         e.range.getSheet().getRange(e.range.getRow(), updatedColumn).setValue(new Date().toISOString());
       }
+      const statusColumn = RECORD_HEADERS.indexOf("Estado") + 1;
+      if (e.range.getColumn() === statusColumn) {
+        const progressColumn = RECORD_HEADERS.indexOf("Avance") + 1;
+        const currentProgress = numberValue(e.range.getSheet().getRange(e.range.getRow(), progressColumn).getValue());
+        e.range.getSheet().getRange(e.range.getRow(), progressColumn).setValue(editorialProgress(e.value, currentProgress));
+      }
     }
-    if (name === SHEETS.payments) touchPaymentRecord(e.range.getSheet(), e.range.getRow());
+    if (name === SHEETS.payments) {
+      normalizePaymentRow(e.range.getSheet(), e.range.getRow(), e.range.getColumn());
+      touchPaymentRecord(e.range.getSheet(), e.range.getRow());
+    }
     if (name === SHEETS.investigators) {
       const updatedColumn = INVESTIGATOR_HEADERS.indexOf("Actualizado") + 1;
       if (e.range.getColumn() !== updatedColumn) e.range.getSheet().getRange(e.range.getRow(), updatedColumn).setValue(new Date().toISOString());
@@ -150,6 +162,35 @@ function onEdit(e) {
   } finally {
     lock.releaseLock();
   }
+}
+
+function editorialProgress(status, currentProgress) {
+  const value = text(status).normalize("NFD").replace(/[\u0300-\u036f]/g, "").toUpperCase();
+  if (/PUBLICAD|FINALIZAD|CERRAD/.test(value)) return 100;
+  if (/PARES|REVISION/.test(value)) return 75;
+  if (/ENVIAD|SUBID|REVISTA|ACEPTAD/.test(value)) return 50;
+  if (/ELABOR|DESARROLL|PROCESO|CORRECCION/.test(value)) return 25;
+  if (/POR.*ASIGNAR|SIN.*ASIGNAR|PENDIENTE/.test(value)) return 0;
+  return numberValue(currentProgress);
+}
+
+function normalizePaymentRow(sheet, row, editedColumn) {
+  const amountColumn = PAYMENT_HEADERS.indexOf("Valor") + 1;
+  const statusColumn = PAYMENT_HEADERS.indexOf("Estado") + 1;
+  const paidColumn = PAYMENT_HEADERS.indexOf("Valor pagado") + 1;
+  const amount = Math.max(0, numberValue(sheet.getRange(row, amountColumn).getValue()));
+  let paid = Math.max(0, numberValue(sheet.getRange(row, paidColumn).getValue()));
+  let status = text(sheet.getRange(row, statusColumn).getValue()).toLowerCase();
+  if (editedColumn === statusColumn) {
+    if (status === "pagado") paid = amount;
+    if (status === "pendiente" || status === "vencido") paid = 0;
+  } else if (editedColumn === amountColumn && status === "pagado") {
+    paid = amount;
+  } else if (editedColumn === paidColumn) {
+    status = paid <= 0 ? "pendiente" : amount <= 0 || paid >= amount ? "pagado" : "parcial";
+  }
+  sheet.getRange(row, paidColumn).setValue(paid);
+  sheet.getRange(row, statusColumn).setValue(status || "pendiente");
 }
 
 function parseBody(e) {
@@ -224,18 +265,25 @@ function applyDropdownValidations() {
   if (!sheet || sheet.getMaxRows() < 2) return;
   const rows = sheet.getMaxRows() - 1;
   const lists = {
-    Estado: ["Pendiente", "Finalizado", "Elaboración", "Espera del cliente", "Por asignar"],
-    Producto: ["Latindex", "Scielo", "Scopus", "WoS"],
-    Indexacion: ["Latindex", "Scielo", "Q4", "Q3", "Q2", "Q1"],
+    Estado: ["Por asignar", "Pendiente", "Elaboración", "Enviado a la revista", "Revisión Pares", "Espera del cliente", "Publicado", "Finalizado"],
+    Producto: ["Latindex", "Scielo", "Scopus", "WoS", "Tesis pregrado", "Monografía", "Tesis Doctoral", "Tesis Postgrado", "Fast Track"],
+    Indexacion: ["Latindex", "Scielo", "Q4", "Q3", "Q2", "Q1", "Tesis pregrado", "Monografía", "Tesis Doctoral", "Tesis Postgrado", "Fast Track"],
     "Prioridad operativa": ["Normal", "Urgente", "Estancado", "Espera del cliente"],
     "Tiene APC": ["Si", "No"],
     "Factura investigador estado": ["Pendiente", "Emitida", "Pagada", "Anulada"],
+    "Tipo cliente": ["Nuevo", "Existente", "Recomendado"],
+    "Canal venta": ["Facebook", "Instagram", "TikTok", "Recomendación", "Fidelización", "WhatsApp"],
   };
   Object.keys(lists).forEach((header) => {
     const column = RECORD_HEADERS.indexOf(header) + 1;
     if (column <= 0) return;
-    const rule = SpreadsheetApp.newDataValidation().requireValueInList(lists[header], true).setAllowInvalid(header === "Estado").build();
+    const allowImported = ["Estado", "Producto", "Indexacion"].includes(header);
+    const rule = SpreadsheetApp.newDataValidation().requireValueInList(lists[header], true).setAllowInvalid(allowImported).build();
     sheet.getRange(2, column, rows, 1).setDataValidation(rule);
+  });
+  ["ID", "Numero contrato", "Orden produccion", "Documento cliente", "Factura investigador numero"].forEach((header) => {
+    const column = RECORD_HEADERS.indexOf(header) + 1;
+    if (column > 0) sheet.getRange(2, column, rows, 1).setNumberFormat("@");
   });
   const investigators = activeSpreadsheet().getSheetByName(SHEETS.investigators);
   if (investigators && investigators.getMaxRows() > 1) {
@@ -246,6 +294,8 @@ function applyDropdownValidations() {
     const investigatorColumn = RECORD_HEADERS.indexOf("Investigador") + 1;
     const investigatorRule = SpreadsheetApp.newDataValidation().requireValueInRange(names, true).setAllowInvalid(true).build();
     sheet.getRange(2, investigatorColumn, rows, 1).setDataValidation(investigatorRule);
+    const documentColumn = INVESTIGATOR_HEADERS.indexOf("Documento") + 1;
+    investigators.getRange(2, documentColumn, investigators.getMaxRows() - 1, 1).setNumberFormat("@");
   }
 }
 
@@ -261,7 +311,6 @@ function migrarDatosV2() {
     if (!text(row[col("ID")])) return;
     if (!text(row[col("Prioridad operativa")])) row[col("Prioridad operativa")] = "Normal";
     if (!text(row[col("Fecha inicio contrato")])) row[col("Fecha inicio contrato")] = row[col("Fecha inicio")];
-    if (!text(row[col("Fecha fin contrato")])) row[col("Fecha fin contrato")] = row[col("Fecha fin")];
     if (!text(row[col("Tiene APC")])) row[col("Tiene APC")] = numberValue(row[col("Valor APC")]) > 0 ? "Si" : "No";
     if (!text(row[col("Factura investigador estado")])) row[col("Factura investigador estado")] = "Pendiente";
     [row[col("Investigador")], row[col("Investigador anterior")]].forEach((rawName) => {
@@ -310,6 +359,29 @@ function migrarDatosV3() {
   applyDropdownValidations();
 }
 
+function migrarDatosV4() {
+  migrarDatosV3();
+  const records = readRecords();
+  records.forEach((record) => {
+    record.clientType = record.clientType || "Existente";
+    record.seller = record.seller || "";
+    record.salesChannel = record.salesChannel || "";
+    record.saleDate = record.saleDate || "";
+    record.salesNotes = record.salesNotes || "";
+    record.investigatorHistory = (Array.isArray(record.investigatorHistory) ? record.investigatorHistory : []).map((assignment) => ({
+      ...assignment,
+      paymentMode: assignment.paymentMode === "unico" ? "unico" : "dos_abonos",
+    }));
+  });
+  writeRecords(records);
+  writePayments(records);
+  writeClients(records);
+  writeInvestigatorHistory(records);
+  PropertiesService.getScriptProperties().deleteProperty(PROP_FINGERPRINT);
+  setRevision(getRevision() + 1);
+  applyDropdownValidations();
+}
+
 function legacyInvestigatorAssignments(record) {
   const currentInvestigator = text(record.investigator);
   const previousInvestigator = text(record.previousInvestigator);
@@ -329,6 +401,7 @@ function legacyInvestigatorAssignments(record) {
       startDate: record.contractStartDate || record.startDate || "",
       endDate: record.investigatorStartDate || record.endDate || record.contractEndDate || "",
       agreedPayment: 0,
+      paymentMode: "dos_abonos",
       installments: [
         { number: 1, amount: 0, paidAmount: 0, scheduledDate: "", paidDate: "", status: "pendiente" },
         { number: 2, amount: 0, paidAmount: 0, scheduledDate: "", paidDate: "", status: "pendiente" },
@@ -346,6 +419,7 @@ function legacyInvestigatorAssignments(record) {
     startDate: record.investigatorStartDate || record.startDate || "",
     endDate: record.investigatorEndDate || record.endDate || "",
     agreedPayment: fee,
+    paymentMode: "dos_abonos",
     installments: [
       { number: 1, amount: firstAmount, paidAmount: firstPaid, scheduledDate: "", paidDate: "", status: status(firstPaid, firstAmount) },
       { number: 2, amount: secondAmount, paidAmount: secondPaid, scheduledDate: "", paidDate: "", status: status(secondPaid, secondAmount) },
@@ -569,6 +643,8 @@ function recordToRow(record) {
     cell(JSON.stringify(Array.isArray(record.journalAccesses) ? record.journalAccesses : [])),
     cell(JSON.stringify(Array.isArray(record.driveFiles) ? record.driveFiles : [])),
     cell(JSON.stringify(Array.isArray(record.investigatorHistory) ? record.investigatorHistory : [])),
+    cell(record.clientType || "Existente"), cell(record.seller), cell(record.salesChannel),
+    cell(record.saleDate), cell(record.salesNotes),
   ];
 }
 
@@ -611,7 +687,7 @@ function readRecords() {
     updatedAt: timestampText(row.Actualizado),
     operationalStatus: text(row["Prioridad operativa"]) || "Normal",
     contractStartDate: dateText(row["Fecha inicio contrato"]) || dateText(row["Fecha inicio"]),
-    contractEndDate: dateText(row["Fecha fin contrato"]) || dateText(row["Fecha fin"]),
+    contractEndDate: dateText(row["Fecha fin contrato"]),
     contractLink: text(row["Link contrato"]),
     investigatorStartDate: dateText(row["Fecha inicio investigador"]),
     investigatorEndDate: dateText(row["Fecha fin investigador"]),
@@ -619,6 +695,11 @@ function readRecords() {
     clientPhone: text(row["Telefono cliente"]),
     clientAddress: text(row["Direccion cliente"]),
     clientInstitution: text(row["Institucion cliente"]),
+    clientType: text(row["Tipo cliente"]) || "Existente",
+    seller: text(row.Vendedor),
+    salesChannel: text(row["Canal venta"]),
+    saleDate: dateText(row["Fecha venta"]),
+    salesNotes: text(row["Informacion ventas"]),
     investigatorInvoiceNumber: text(row["Factura investigador numero"]),
     investigatorInvoiceDate: dateText(row["Factura investigador fecha"]),
     investigatorInvoiceValue: numberValue(row["Factura investigador valor"]),
@@ -637,6 +718,7 @@ function writePayments(records) {
       rows.push([
         cell(payment.id), cell(record.id), cell(record.client), cell(record.contractNumber), cell(payment.concept),
         cell(payment.scheduledDate), cell(payment.paidDate), numberValue(payment.amount), cell(payment.status), cell(payment.note),
+        numberValue(payment.paidAmount),
       ]);
     });
   });
@@ -649,13 +731,17 @@ function readPayments() {
     const recordId = text(row["ID proceso"]);
     if (!recordId || !text(row["ID pago"])) return;
     const list = grouped.get(recordId) || [];
+    const amount = numberValue(row.Valor);
+    const storedPaid = text(row["Valor pagado"]);
+    const status = text(row.Estado) || "pendiente";
     list.push({
       id: text(row["ID pago"]),
       concept: text(row.Concepto),
       scheduledDate: dateText(row["Fecha programada"]),
       paidDate: dateText(row["Fecha pagada"]),
-      amount: numberValue(row.Valor),
-      status: text(row.Estado) || "pendiente",
+      amount,
+      paidAmount: storedPaid ? numberValue(row["Valor pagado"]) : status.toLowerCase() === "pagado" ? amount : 0,
+      status,
       note: text(row.Nota),
     });
     grouped.set(recordId, list);
@@ -716,6 +802,7 @@ function writeClients(records) {
       items.reduce((sum, item) => sum + numberValue(item.clientTotal), 0),
       items.reduce((sum, item) => sum + clientRecordBalance(item), 0),
       cell(JSON.stringify(contracts)), cell(items.map((item) => item.updatedAt).sort().pop() || new Date().toISOString()),
+      cell(profile.clientType || "Existente"), cell(profile.seller), cell(profile.salesChannel), cell(profile.saleDate),
     ];
   });
   replaceRows(activeSpreadsheet().getSheetByName(SHEETS.clients), CLIENT_HEADERS, rows);
@@ -723,11 +810,19 @@ function writeClients(records) {
 
 function clientRecordBalance(record) {
   const payments = Array.isArray(record.clientPayments) ? record.clientPayments : [];
-  const paid = payments.filter((payment) => text(payment.status).toLowerCase() === "pagado")
-    .reduce((sum, payment) => sum + numberValue(payment.amount), 0);
-  if (paid > 0 && numberValue(record.clientTotal) > 0) return Math.max(0, numberValue(record.clientTotal) - paid);
-  if (numberValue(record.outstandingBalance) > 0) return numberValue(record.outstandingBalance);
-  return Math.max(0, numberValue(record.clientTotal) - paid);
+  const paid = payments.reduce((sum, payment) => {
+    const amount = Math.max(0, numberValue(payment.amount));
+    const paidAmount = Math.max(0, numberValue(payment.paidAmount));
+    const status = text(payment.status).toLowerCase();
+    if (status === "pagado") return sum + Math.max(paidAmount, amount);
+    if (status === "parcial") return sum + (amount > 0 ? Math.min(paidAmount, amount) : paidAmount);
+    return sum;
+  }, 0);
+  const total = Math.max(0, numberValue(record.clientTotal));
+  const confirmed = Math.max(0, numberValue(record.outstandingBalance));
+  if (total > 0) return Math.max(0, total - paid);
+  if (payments.length) return Math.max(0, confirmed - paid);
+  return confirmed;
 }
 
 function writeInvestigatorHistory(records) {
@@ -746,6 +841,7 @@ function writeInvestigatorHistory(records) {
         numberValue(second.amount), numberValue(second.paidAmount), cell(second.scheduledDate), cell(second.paidDate),
         cell(second.status || "pendiente"), paid, Math.max(0, numberValue(assignment.agreedPayment) - paid),
         cell(assignment.notes), cell(assignment.createdAt), cell(assignment.updatedAt),
+        cell(assignment.paymentMode === "unico" ? "unico" : "dos_abonos"),
       ]);
     });
   });

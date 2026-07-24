@@ -83,14 +83,11 @@ export const formatDate = (value: string) => {
 export const statusProgress = (status: string) => {
   const text = normalizeText(status).toUpperCase();
   if (/PUBLICAD|FINALIZAD|CERRAD/.test(text)) return 100;
-  if (/ACEPTAD/.test(text)) return 90;
-  if (/TERMINAD|ENTREGAD/.test(text)) return 82;
-  if (/CORRECCION|PARES|REVISION/.test(text)) return 68;
-  if (/ENVIAD|SUBID|REVISTA/.test(text)) return 55;
-  if (/ELABOR|DESARROLL|PROCESO/.test(text)) return 38;
-  if (/RECHAZAD/.test(text)) return 25;
-  if (/PAUSAD|PENDIENTE|ESPERA/.test(text)) return 15;
-  return text ? 30 : 0;
+  if (/PARES|REVISION/.test(text)) return 75;
+  if (/ENVIAD|SUBID|REVISTA|ACEPTAD/.test(text)) return 50;
+  if (/ELABOR|DESARROLL|PROCESO|CORRECCION/.test(text)) return 25;
+  if (/POR.*ASIGNAR|SIN.*ASIGNAR|PENDIENTE/.test(text)) return 0;
+  return 0;
 };
 
 export const blankPayment = (concept = "Próximo pago"): ClientPayment => ({
@@ -99,6 +96,7 @@ export const blankPayment = (concept = "Próximo pago"): ClientPayment => ({
   scheduledDate: "",
   paidDate: "",
   amount: 0,
+  paidAmount: 0,
   status: "pendiente",
   note: "",
 });
@@ -155,6 +153,7 @@ export const blankInvestigatorAssignment = (investigator = ""): InvestigatorAssi
     startDate: "",
     endDate: "",
     agreedPayment: 0,
+    paymentMode: "dos_abonos",
     installments: [blankInvestigatorInstallment(1), blankInvestigatorInstallment(2)],
     notes: "",
     isCurrent: true,
@@ -212,6 +211,11 @@ export const blankRecord = (): EditorialRecord => {
     clientPhone: "",
     clientAddress: "",
     clientInstitution: "",
+    clientType: "Nuevo",
+    seller: "",
+    salesChannel: "",
+    saleDate: "",
+    salesNotes: "",
     driveFiles: [],
     observations: "",
     sources: ["Registro manual"],
@@ -220,17 +224,25 @@ export const blankRecord = (): EditorialRecord => {
   };
 };
 
-export const paidByClient = (record: EditorialRecord) =>
-  record.clientPayments
-    .filter((payment) => payment.status === "pagado")
-    .reduce((sum, payment) => sum + payment.amount, 0);
+export const paidClientPaymentAmount = (payment: ClientPayment) => {
+  const amount = Math.max(0, Number(payment.amount) || 0);
+  const paidAmount = Math.max(0, Number(payment.paidAmount) || 0);
+  if (payment.status === "pagado") return Math.max(paidAmount, amount);
+  if (payment.status === "parcial") return amount > 0 ? Math.min(paidAmount, amount) : paidAmount;
+  return 0;
+};
 
-export const clientBalance = (record: EditorialRecord) =>
-  paidByClient(record) > 0 && record.clientTotal > 0
-    ? Math.max(0, record.clientTotal - paidByClient(record))
-    : Number(record.outstandingBalance) > 0
-      ? Number(record.outstandingBalance)
-      : Math.max(0, record.clientTotal - paidByClient(record));
+export const paidByClient = (record: EditorialRecord) =>
+  record.clientPayments.reduce((sum, payment) => sum + paidClientPaymentAmount(payment), 0);
+
+export const clientBalance = (record: EditorialRecord) => {
+  const paid = paidByClient(record);
+  const total = Math.max(0, Number(record.clientTotal) || 0);
+  const confirmed = Math.max(0, Number(record.outstandingBalance) || 0);
+  if (total > 0) return Math.max(0, total - paid);
+  if (record.clientPayments.length > 0) return Math.max(0, confirmed - paid);
+  return confirmed;
+};
 
 export const daysFromToday = (date: string) => {
   if (!date) return Number.POSITIVE_INFINITY;

@@ -131,6 +131,7 @@ textarea { resize: vertical; line-height: 1.5; }
 .kpi-card strong { color: #1b3833; font-family: Georgia, serif; font-size: clamp(21px, 2vw, 28px); font-weight: 500; letter-spacing: -.02em; white-space: nowrap; }
 .kpi-card small { overflow: hidden; color: #85918d; font-size: 10px; line-height: 1.4; text-overflow: ellipsis; white-space: nowrap; }
 .dashboard-grid { display: grid; grid-template-columns: 1.15fr .85fr; gap: 20px; }
+.dashboard-extra-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
 .panel { min-width: 0; padding: 20px; background: var(--surface); border: 1px solid #e5e2d9; border-radius: var(--radius); box-shadow: 0 5px 20px rgba(30,50,46,.032); }
 .panel-heading { display: flex; align-items: flex-start; justify-content: space-between; gap: 18px; margin-bottom: 18px; }
 .panel-heading > div { display: grid; gap: 5px; }
@@ -147,6 +148,7 @@ textarea { resize: vertical; line-height: 1.5; }
 .chart-legend i { width: 8px; height: 8px; border-radius: 3px; }
 .chart-legend strong { color: var(--ink); }
 .bar-chart { width: 100%; height: 250px; }
+.distribution-chart { width: 100%; height: 270px; }
 .priority-list { display: grid; }
 .priority-list > button { width: 100%; display: grid; grid-template-columns: 10px minmax(180px, 1.5fr) minmax(130px, 1fr) minmax(120px, .7fr) 24px; align-items: center; gap: 13px; padding: 13px 8px; background: none; border: 0; border-top: 1px solid #eeece6; cursor: pointer; text-align: left; }
 .priority-list > button:first-child { border-top: 0; }
@@ -468,6 +470,7 @@ textarea { resize: vertical; line-height: 1.5; }
 .record-error { position: sticky; bottom: 0; z-index: 3; box-shadow: 0 8px 24px rgba(166,69,58,.14); }
 .range-field { min-height: 41px; display: grid; grid-template-columns: 1fr 40px; align-items: center; gap: 10px; }
 .range-field input { padding: 0; accent-color: var(--green); }
+.range-field input:disabled { cursor: not-allowed; opacity: .85; }
 .range-field strong { font-size: 11px; }
 .source-box { display: grid; gap: 7px; padding: 13px; background: #f7f8f5; border: 1px solid #e5e7e1; border-radius: 10px; }
 .source-box strong { font-size: 11px; }
@@ -483,7 +486,7 @@ textarea { resize: vertical; line-height: 1.5; }
 .section-heading h3 { margin: 17px 0 3px; font-family: Georgia, serif; font-size: 18px; font-weight: 500; }
 .section-heading p { margin: 0; color: var(--muted); font-size: 10px; }
 .payment-editor { display: grid; gap: 7px; }
-.payment-row { display: grid; grid-template-columns: 1.25fr .7fr .85fr .8fr 35px; gap: 7px; }
+.payment-row { display: grid; grid-template-columns: 1.15fr .65fr .65fr .85fr .8fr 35px; gap: 7px; }
 .payment-row input, .payment-row select { min-width: 0; padding: 9px; font-size: 10px; }
 .modal-footer { display: flex; align-items: center; justify-content: space-between; gap: 15px; padding: 14px 24px; background: #fafaf7; border-top: 1px solid #e6e5df; }
 .modal-footer > div { display: flex; gap: 8px; }

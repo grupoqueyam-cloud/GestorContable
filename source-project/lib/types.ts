@@ -34,6 +34,7 @@ export interface Investigator {
 }
 
 export type InvestigatorInstallmentStatus = "pendiente" | "parcial" | "pagado";
+export type InvestigatorPaymentMode = "unico" | "dos_abonos";
 
 export interface InvestigatorInstallment {
   number: 1 | 2;
@@ -50,6 +51,7 @@ export interface InvestigatorAssignment {
   startDate: string;
   endDate: string;
   agreedPayment: number;
+  paymentMode: InvestigatorPaymentMode;
   installments: [InvestigatorInstallment, InvestigatorInstallment];
   notes: string;
   isCurrent: boolean;
@@ -63,6 +65,7 @@ export interface ClientPayment {
   scheduledDate: string;
   paidDate: string;
   amount: number;
+  paidAmount: number;
   status: PaymentStatus;
   note: string;
 }
@@ -114,6 +117,11 @@ export interface EditorialRecord {
   clientPhone: string;
   clientAddress: string;
   clientInstitution: string;
+  clientType: string;
+  seller: string;
+  salesChannel: string;
+  saleDate: string;
+  salesNotes: string;
   driveFiles: DriveFile[];
   observations: string;
   sources: string[];
@@ -143,7 +151,7 @@ export interface GoogleSheetsConfig {
 }
 
 export interface AppData {
-  version: 2 | 3 | 4 | 5;
+  version: 2 | 3 | 4 | 5 | 6;
   records: EditorialRecord[];
   investigators: Investigator[];
   auditLog: AuditEntry[];
