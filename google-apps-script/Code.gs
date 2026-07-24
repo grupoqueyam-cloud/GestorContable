@@ -12,7 +12,7 @@
  */
 
 const APP_NAME = "Control Editorial Sustainability";
-const SCHEMA_VERSION = 4;
+const SCHEMA_VERSION = 5;
 const PROP_SECRET = "SYNC_SECRET";
 const PROP_REVISION = "DATA_REVISION";
 const PROP_FINGERPRINT = "DATA_FINGERPRINT";
@@ -24,6 +24,7 @@ const SHEETS = {
   deleted: "Eliminados",
   config: "Configuracion",
   investigators: "Investigadores",
+  sellers: "Vendedores",
   clients: "Clientes",
   investigatorHistory: "HistorialInvestigadores",
 };
@@ -41,6 +42,7 @@ const RECORD_HEADERS = [
   "Factura investigador fecha", "Factura investigador valor", "Factura investigador link",
   "Factura investigador estado", "Revistas JSON", "Drive JSON", "Historial investigadores JSON",
   "Tipo cliente", "Vendedor", "Canal venta", "Fecha venta", "Informacion ventas",
+  "Pais cliente", "Medio contacto", "Recomendado por",
 ];
 
 const PAYMENT_HEADERS = [
@@ -59,6 +61,11 @@ const CLIENT_HEADERS = [
   "ID cliente", "Cliente", "Documento", "Email", "Telefono", "Direccion", "Institucion",
   "Numero contratos", "Contratos activos", "Valor total", "Cartera", "Contratos JSON", "Actualizado",
   "Tipo cliente", "Vendedor", "Canal venta", "Fecha venta",
+  "Pais cliente", "Medio contacto", "Recomendado por",
+];
+const SELLER_HEADERS = [
+  "ID", "Nombre", "Documento", "Email", "Telefono", "Fecha ingreso", "Fecha salida",
+  "Notas", "Activo", "Creado", "Actualizado",
 ];
 const INVESTIGATOR_HISTORY_HEADERS = [
   "ID asignacion", "ID proceso", "Cliente", "Numero contrato", "Investigador", "Responsable actual",
@@ -99,7 +106,7 @@ function doPost(e) {
 
 function configurarHojas() {
   ensureSheets();
-  migrarDatosV4();
+  migrarDatosV5();
   applyDropdownValidations();
   const properties = PropertiesService.getScriptProperties();
   if (properties.getProperty(PROP_REVISION) === null) properties.setProperty(PROP_REVISION, "0");
@@ -115,7 +122,7 @@ function onOpen() {
   SpreadsheetApp.getUi()
     .createMenu("Control Editorial")
     .addItem("Configurar hojas", "configurarHojas")
-    .addItem("Migrar datos a versión 4", "migrarDatosV4")
+    .addItem("Migrar datos a versión 5", "migrarDatosV5")
     .addItem("Ver estado", "mostrarEstado")
     .addToUi();
 }
@@ -124,7 +131,7 @@ function mostrarEstado() {
   const counts = getCounts();
   SpreadsheetApp.getUi().alert(
     APP_NAME,
-    `Revision: ${getRevision()}\nClientes: ${counts.clients}\nProcesos: ${counts.records}\nInvestigadores: ${counts.investigators}\nAsignaciones: ${counts.assignments}\nEsquema: ${SCHEMA_VERSION}`,
+    `Revision: ${getRevision()}\nClientes: ${counts.clients}\nProcesos: ${counts.records}\nInvestigadores: ${counts.investigators}\nVendedores: ${counts.sellers}\nAsignaciones: ${counts.assignments}\nEsquema: ${SCHEMA_VERSION}`,
     SpreadsheetApp.getUi().ButtonSet.OK,
   );
 }
@@ -133,7 +140,7 @@ function mostrarEstado() {
 function onEdit(e) {
   if (!e || !e.range || e.range.getRow() < 2) return;
   const name = e.range.getSheet().getName();
-  if (![SHEETS.records, SHEETS.payments, SHEETS.deleted, SHEETS.investigators].includes(name)) return;
+  if (![SHEETS.records, SHEETS.payments, SHEETS.deleted, SHEETS.investigators, SHEETS.sellers].includes(name)) return;
   const lock = LockService.getScriptLock();
   if (!lock.tryLock(5000)) return;
   try {
@@ -148,13 +155,22 @@ function onEdit(e) {
         const currentProgress = numberValue(e.range.getSheet().getRange(e.range.getRow(), progressColumn).getValue());
         e.range.getSheet().getRange(e.range.getRow(), progressColumn).setValue(editorialProgress(e.value, currentProgress));
       }
+      if (e.range.getColumn() === RECORD_HEADERS.indexOf("Total cliente") + 1) {
+        refreshRecordFinancials(text(e.range.getSheet().getRange(e.range.getRow(), 1).getValue()));
+      }
+      writeClients(readRecords());
     }
     if (name === SHEETS.payments) {
       normalizePaymentRow(e.range.getSheet(), e.range.getRow(), e.range.getColumn());
       touchPaymentRecord(e.range.getSheet(), e.range.getRow());
+      writeClients(readRecords());
     }
     if (name === SHEETS.investigators) {
       const updatedColumn = INVESTIGATOR_HEADERS.indexOf("Actualizado") + 1;
+      if (e.range.getColumn() !== updatedColumn) e.range.getSheet().getRange(e.range.getRow(), updatedColumn).setValue(new Date().toISOString());
+    }
+    if (name === SHEETS.sellers) {
+      const updatedColumn = SELLER_HEADERS.indexOf("Actualizado") + 1;
       if (e.range.getColumn() !== updatedColumn) e.range.getSheet().getRange(e.range.getRow(), updatedColumn).setValue(new Date().toISOString());
     }
     PropertiesService.getScriptProperties().deleteProperty(PROP_FINGERPRINT);
@@ -256,6 +272,7 @@ function ensureSheets() {
   prepareSheet(spreadsheet, SHEETS.deleted, DELETED_HEADERS, "#9a5b52");
   prepareSheet(spreadsheet, SHEETS.config, CONFIG_HEADERS, "#6c766f");
   prepareSheet(spreadsheet, SHEETS.investigators, INVESTIGATOR_HEADERS, "#2f6f64");
+  prepareSheet(spreadsheet, SHEETS.sellers, SELLER_HEADERS, "#b07a1c");
   prepareSheet(spreadsheet, SHEETS.clients, CLIENT_HEADERS, "#17463f");
   prepareSheet(spreadsheet, SHEETS.investigatorHistory, INVESTIGATOR_HISTORY_HEADERS, "#536e8a");
 }
@@ -266,13 +283,14 @@ function applyDropdownValidations() {
   const rows = sheet.getMaxRows() - 1;
   const lists = {
     Estado: ["Por asignar", "Pendiente", "Elaboración", "Enviado a la revista", "Revisión Pares", "Espera del cliente", "Publicado", "Finalizado"],
-    Producto: ["Latindex", "Scielo", "Scopus", "WoS", "Tesis pregrado", "Monografía", "Tesis Doctoral", "Tesis Postgrado", "Fast Track"],
-    Indexacion: ["Latindex", "Scielo", "Q4", "Q3", "Q2", "Q1", "Tesis pregrado", "Monografía", "Tesis Doctoral", "Tesis Postgrado", "Fast Track"],
+    Producto: ["Latindex", "Scielo", "Scopus", "WoS", "Tesis pregrado", "Monografía", "Tesis Doctoral", "Tesis Postgrado", "Fast Track", "Scielo FastTrack", "Latindex FastTrack"],
+    Indexacion: ["Latindex", "Scielo", "Q4", "Q3", "Q2", "Q1", "Tesis pregrado", "Monografía", "Tesis Doctoral", "Tesis Postgrado", "Fast Track", "Scielo FastTrack", "Latindex FastTrack"],
     "Prioridad operativa": ["Normal", "Urgente", "Estancado", "Espera del cliente"],
     "Tiene APC": ["Si", "No"],
     "Factura investigador estado": ["Pendiente", "Emitida", "Pagada", "Anulada"],
     "Tipo cliente": ["Nuevo", "Existente", "Recomendado"],
     "Canal venta": ["Facebook", "Instagram", "TikTok", "Recomendación", "Fidelización", "WhatsApp"],
+    "Medio contacto": ["Instagram", "Facebook", "TikTok", "WhatsApp", "Recomendación"],
   };
   Object.keys(lists).forEach((header) => {
     const column = RECORD_HEADERS.indexOf(header) + 1;
@@ -296,6 +314,18 @@ function applyDropdownValidations() {
     sheet.getRange(2, investigatorColumn, rows, 1).setDataValidation(investigatorRule);
     const documentColumn = INVESTIGATOR_HEADERS.indexOf("Documento") + 1;
     investigators.getRange(2, documentColumn, investigators.getMaxRows() - 1, 1).setNumberFormat("@");
+  }
+  const sellers = activeSpreadsheet().getSheetByName(SHEETS.sellers);
+  if (sellers && sellers.getMaxRows() > 1) {
+    const activeColumn = SELLER_HEADERS.indexOf("Activo") + 1;
+    const rule = SpreadsheetApp.newDataValidation().requireValueInList(["Si", "No"], true).setAllowInvalid(false).build();
+    sellers.getRange(2, activeColumn, sellers.getMaxRows() - 1, 1).setDataValidation(rule);
+    const names = sellers.getRange(2, SELLER_HEADERS.indexOf("Nombre") + 1, Math.max(1, sellers.getMaxRows() - 1), 1);
+    const sellerColumn = RECORD_HEADERS.indexOf("Vendedor") + 1;
+    const sellerRule = SpreadsheetApp.newDataValidation().requireValueInRange(names, true).setAllowInvalid(true).build();
+    sheet.getRange(2, sellerColumn, rows, 1).setDataValidation(sellerRule);
+    const documentColumn = SELLER_HEADERS.indexOf("Documento") + 1;
+    sellers.getRange(2, documentColumn, sellers.getMaxRows() - 1, 1).setNumberFormat("@");
   }
 }
 
@@ -382,6 +412,50 @@ function migrarDatosV4() {
   applyDropdownValidations();
 }
 
+function migrarDatosV5() {
+  migrarDatosV4();
+  const records = readRecords();
+  const sellers = readSellers();
+  const knownSellers = new Set(sellers.map((item) => text(item.name).toUpperCase()));
+  records.forEach((record) => {
+    record.clientCountry = record.clientCountry || "";
+    record.contactMedium = record.contactMedium || "";
+    record.referredBy = record.referredBy || "";
+    if (numberValue(record.clientTotal) > 0) {
+      record.outstandingBalance = clientRecordBalance(record);
+    }
+    if (record.outstandingBalance <= 0 && numberValue(record.clientTotal) > 0) {
+      record.nextPaymentAmount = 0;
+    }
+    const sellerName = text(record.seller);
+    const sellerKey = sellerName.toUpperCase();
+    if (!sellerName || knownSellers.has(sellerKey)) return;
+    const now = new Date().toISOString();
+    sellers.push({
+      id: Utilities.getUuid(),
+      name: sellerName,
+      documentId: "",
+      email: "",
+      phone: "",
+      startDate: "",
+      endDate: "",
+      notes: "Migrado desde procesos existentes",
+      active: true,
+      createdAt: now,
+      updatedAt: now,
+    });
+    knownSellers.add(sellerKey);
+  });
+  writeRecords(records);
+  writePayments(records);
+  writeClients(records);
+  writeInvestigatorHistory(records);
+  writeSellers(sellers);
+  PropertiesService.getScriptProperties().deleteProperty(PROP_FINGERPRINT);
+  setRevision(getRevision() + 1);
+  applyDropdownValidations();
+}
+
 function legacyInvestigatorAssignments(record) {
   const currentInvestigator = text(record.investigator);
   const previousInvestigator = text(record.previousInvestigator);
@@ -462,6 +536,7 @@ function handlePing() {
     recordCount: counts.records,
     paymentCount: counts.payments,
     investigatorCount: counts.investigators,
+    sellerCount: counts.sellers,
     clientCount: counts.clients,
     assignmentCount: counts.assignments,
   };
@@ -487,6 +562,7 @@ function handlePull(includeCredentials) {
     serverTime: new Date().toISOString(),
     records,
     investigators: readInvestigators(),
+    sellers: readSellers(),
     auditLog: readAudit(),
     deletedRecords: readDeleted(),
   };
@@ -511,6 +587,7 @@ function handleSync(body) {
           auditLog: pull.auditLog,
           deletedRecords: pull.deletedRecords,
           investigators: pull.investigators,
+          sellers: pull.sellers,
           schemaVersion: SCHEMA_VERSION,
         },
       };
@@ -525,9 +602,10 @@ function handleSync(body) {
 
     if (!body.includeCredentials) preserveStoredCredentials(records);
     const investigators = Array.isArray(body.investigators) ? body.investigators : [];
+    const sellers = Array.isArray(body.sellers) ? body.sellers : [];
     const audit = Array.isArray(body.auditLog) ? body.auditLog.slice(0, 500) : [];
     const deleted = Array.isArray(body.deletedRecords) ? body.deletedRecords : [];
-    const incomingFingerprint = fingerprint({ records, investigators, audit, deleted });
+    const incomingFingerprint = fingerprint({ records, investigators, sellers, audit, deleted });
     const properties = PropertiesService.getScriptProperties();
     if (properties.getProperty(PROP_FINGERPRINT) === incomingFingerprint) {
       return {
@@ -537,6 +615,7 @@ function handleSync(body) {
         recordCount: records.length,
         paymentCount: records.reduce((sum, record) => sum + (Array.isArray(record.clientPayments) ? record.clientPayments.length : 0), 0),
         investigatorCount: investigators.length,
+        sellerCount: sellers.length,
         unchanged: true,
       };
     }
@@ -550,6 +629,7 @@ function handleSync(body) {
     writeRecords(records);
     writePayments(records);
     writeInvestigators(investigators);
+    writeSellers(sellers);
     writeClients(records);
     writeInvestigatorHistory(records);
     applyDropdownValidations();
@@ -557,7 +637,7 @@ function handleSync(body) {
     writeDeleted(deleted);
     const revision = currentRevision + 1;
     setRevision(revision);
-    properties.setProperty(PROP_FINGERPRINT, fingerprint({ records, investigators, audit: audit.slice(0, 500), deleted }));
+    properties.setProperty(PROP_FINGERPRINT, fingerprint({ records, investigators, sellers, audit: audit.slice(0, 500), deleted }));
     SpreadsheetApp.flush();
     return {
       ok: true,
@@ -566,6 +646,7 @@ function handleSync(body) {
       recordCount: records.length,
       paymentCount: records.reduce((sum, record) => sum + (Array.isArray(record.clientPayments) ? record.clientPayments.length : 0), 0),
       investigatorCount: investigators.length,
+      sellerCount: sellers.length,
     };
   } finally {
     lock.releaseLock();
@@ -593,6 +674,7 @@ function getCounts() {
     records: Math.max(0, spreadsheet.getSheetByName(SHEETS.records).getLastRow() - 1),
     payments: Math.max(0, spreadsheet.getSheetByName(SHEETS.payments).getLastRow() - 1),
     investigators: Math.max(0, spreadsheet.getSheetByName(SHEETS.investigators).getLastRow() - 1),
+    sellers: Math.max(0, spreadsheet.getSheetByName(SHEETS.sellers).getLastRow() - 1),
     clients: Math.max(0, spreadsheet.getSheetByName(SHEETS.clients).getLastRow() - 1),
     assignments: Math.max(0, spreadsheet.getSheetByName(SHEETS.investigatorHistory).getLastRow() - 1),
   };
@@ -625,12 +707,15 @@ function writeRecords(records) {
 }
 
 function recordToRow(record) {
+  const calculatedBalance = numberValue(record.clientTotal) > 0
+    ? clientRecordBalance(record)
+    : numberValue(record.outstandingBalance);
   return [
     cell(record.id), cell(record.client), cell(record.topic), cell(record.product), cell(record.indexation),
     cell(record.status), numberValue(record.progress), cell(record.username), cell(record.password), cell(record.journal),
     cell(record.journalLink), cell(record.loginLink), numberValue(record.apcValue), cell(record.investigator),
     cell(record.previousInvestigator), cell(record.startDate), cell(record.endDate), cell(record.acceptanceDate),
-    numberValue(record.clientTotal), numberValue(record.outstandingBalance), cell(record.nextPaymentDate),
+    numberValue(record.clientTotal), calculatedBalance, cell(record.nextPaymentDate),
     numberValue(record.nextPaymentAmount), numberValue(record.investigatorPayment), numberValue(record.investigatorPaid),
     cell(record.contractNumber), cell(record.productionOrder), cell(record.clientEmail), cell(record.clientId),
     cell(record.observations), cell(JSON.stringify(Array.isArray(record.sources) ? record.sources : [])),
@@ -645,6 +730,7 @@ function recordToRow(record) {
     cell(JSON.stringify(Array.isArray(record.investigatorHistory) ? record.investigatorHistory : [])),
     cell(record.clientType || "Existente"), cell(record.seller), cell(record.salesChannel),
     cell(record.saleDate), cell(record.salesNotes),
+    cell(record.clientCountry), cell(record.contactMedium), cell(record.referredBy),
   ];
 }
 
@@ -700,6 +786,9 @@ function readRecords() {
     salesChannel: text(row["Canal venta"]),
     saleDate: dateText(row["Fecha venta"]),
     salesNotes: text(row["Informacion ventas"]),
+    clientCountry: text(row["Pais cliente"]),
+    contactMedium: text(row["Medio contacto"]),
+    referredBy: text(row["Recomendado por"]),
     investigatorInvoiceNumber: text(row["Factura investigador numero"]),
     investigatorInvoiceDate: dateText(row["Factura investigador fecha"]),
     investigatorInvoiceValue: numberValue(row["Factura investigador valor"]),
@@ -733,14 +822,19 @@ function readPayments() {
     const list = grouped.get(recordId) || [];
     const amount = numberValue(row.Valor);
     const storedPaid = text(row["Valor pagado"]);
-    const status = text(row.Estado) || "pendiente";
+    const storedStatus = text(row.Estado).toLowerCase() || "pendiente";
+    const rawPaid = storedPaid ? numberValue(row["Valor pagado"]) : storedStatus === "pagado" ? amount : 0;
+    const paidAmount = Math.max(0, amount > 0 ? Math.min(rawPaid, amount) : rawPaid);
+    const status = paidAmount <= 0
+      ? (storedStatus === "vencido" ? "vencido" : "pendiente")
+      : amount <= 0 || paidAmount >= amount ? "pagado" : "parcial";
     list.push({
       id: text(row["ID pago"]),
       concept: text(row.Concepto),
       scheduledDate: dateText(row["Fecha programada"]),
       paidDate: dateText(row["Fecha pagada"]),
       amount,
-      paidAmount: storedPaid ? numberValue(row["Valor pagado"]) : status.toLowerCase() === "pagado" ? amount : 0,
+      paidAmount,
       status,
       note: text(row.Nota),
     });
@@ -778,6 +872,33 @@ function readInvestigators() {
     }));
 }
 
+function writeSellers(items) {
+  const rows = (Array.isArray(items) ? items : []).filter((item) => item && item.id && item.name).map((item) => [
+    cell(item.id), cell(item.name), cell(item.documentId), cell(item.email), cell(item.phone),
+    cell(item.startDate), cell(item.endDate), cell(item.notes), cell(item.active === false ? "No" : "Si"),
+    cell(item.createdAt), cell(item.updatedAt),
+  ]);
+  replaceRows(activeSpreadsheet().getSheetByName(SHEETS.sellers), SELLER_HEADERS, rows);
+}
+
+function readSellers() {
+  return readObjects(activeSpreadsheet().getSheetByName(SHEETS.sellers), SELLER_HEADERS)
+    .filter((row) => text(row.ID) && text(row.Nombre))
+    .map((row) => ({
+      id: text(row.ID),
+      name: text(row.Nombre),
+      documentId: text(row.Documento),
+      email: text(row.Email),
+      phone: text(row.Telefono),
+      startDate: dateText(row["Fecha ingreso"]),
+      endDate: dateText(row["Fecha salida"]),
+      notes: text(row.Notas),
+      active: booleanValue(row.Activo),
+      createdAt: timestampText(row.Creado),
+      updatedAt: timestampText(row.Actualizado),
+    }));
+}
+
 function writeClients(records) {
   const grouped = new Map();
   (Array.isArray(records) ? records : []).forEach((record) => {
@@ -786,7 +907,8 @@ function writeClients(records) {
     grouped.set(key, [...(grouped.get(key) || []), record]);
   });
   const rows = [...grouped.values()].sort((a, b) => text(a[0].client).localeCompare(text(b[0].client))).map((items) => {
-    const profile = items.find((item) => item.clientEmail || item.clientPhone || item.clientId || item.clientInstitution) || items[0];
+    const profile = items.find((item) => item.clientEmail || item.clientPhone || item.clientId || item.clientInstitution
+      || item.clientCountry || item.contactMedium || item.referredBy) || items[0];
     const contracts = items.map((item) => ({
       id: item.id || "",
       contractNumber: item.contractNumber || "",
@@ -803,6 +925,7 @@ function writeClients(records) {
       items.reduce((sum, item) => sum + clientRecordBalance(item), 0),
       cell(JSON.stringify(contracts)), cell(items.map((item) => item.updatedAt).sort().pop() || new Date().toISOString()),
       cell(profile.clientType || "Existente"), cell(profile.seller), cell(profile.salesChannel), cell(profile.saleDate),
+      cell(profile.clientCountry), cell(profile.contactMedium), cell(profile.referredBy),
     ];
   });
   replaceRows(activeSpreadsheet().getSheetByName(SHEETS.clients), CLIENT_HEADERS, rows);
@@ -814,14 +937,13 @@ function clientRecordBalance(record) {
     const amount = Math.max(0, numberValue(payment.amount));
     const paidAmount = Math.max(0, numberValue(payment.paidAmount));
     const status = text(payment.status).toLowerCase();
-    if (status === "pagado") return sum + Math.max(paidAmount, amount);
-    if (status === "parcial") return sum + (amount > 0 ? Math.min(paidAmount, amount) : paidAmount);
-    return sum;
+    const effectivePaid = status === "pagado" ? Math.max(paidAmount, amount) : paidAmount;
+    return sum + (amount > 0 ? Math.min(effectivePaid, amount) : effectivePaid);
   }, 0);
   const total = Math.max(0, numberValue(record.clientTotal));
   const confirmed = Math.max(0, numberValue(record.outstandingBalance));
   if (total > 0) return Math.max(0, total - paid);
-  if (payments.length) return Math.max(0, confirmed - paid);
+  if (payments.length && confirmed > 0) return Math.max(0, confirmed - paid);
   return confirmed;
 }
 
@@ -901,11 +1023,30 @@ function readObjects(sheet, headers) {
 function touchPaymentRecord(paymentSheet, row) {
   const recordId = text(paymentSheet.getRange(row, PAYMENT_HEADERS.indexOf("ID proceso") + 1).getValue());
   if (!recordId) return;
+  refreshRecordFinancials(recordId);
+}
+
+function refreshRecordFinancials(recordId) {
   const recordsSheet = activeSpreadsheet().getSheetByName(SHEETS.records);
   if (recordsSheet.getLastRow() < 2) return;
   const ids = recordsSheet.getRange(2, 1, recordsSheet.getLastRow() - 1, 1).getValues();
   const index = ids.findIndex((value) => text(value[0]) === recordId);
-  if (index >= 0) recordsSheet.getRange(index + 2, RECORD_HEADERS.indexOf("Actualizado") + 1).setValue(new Date().toISOString());
+  if (index < 0) return;
+  const row = index + 2;
+  const total = Math.max(0, numberValue(recordsSheet.getRange(row, RECORD_HEADERS.indexOf("Total cliente") + 1).getValue()));
+  const currentBalance = Math.max(0, numberValue(recordsSheet.getRange(row, RECORD_HEADERS.indexOf("Saldo pendiente") + 1).getValue()));
+  const payments = readPayments().get(recordId) || [];
+  const paid = payments.reduce((sum, payment) => {
+    const amount = Math.max(0, numberValue(payment.amount));
+    const paidAmount = Math.max(0, numberValue(payment.paidAmount));
+    return sum + (amount > 0 ? Math.min(paidAmount, amount) : paidAmount);
+  }, 0);
+  const balance = total > 0 ? Math.max(0, total - paid) : currentBalance;
+  recordsSheet.getRange(row, RECORD_HEADERS.indexOf("Saldo pendiente") + 1).setValue(balance);
+  if (total > 0 && balance <= 0) {
+    recordsSheet.getRange(row, RECORD_HEADERS.indexOf("Proximo pago valor") + 1).setValue(0);
+  }
+  recordsSheet.getRange(row, RECORD_HEADERS.indexOf("Actualizado") + 1).setValue(new Date().toISOString());
 }
 
 function cell(value) {

@@ -482,6 +482,22 @@ textarea { resize: vertical; line-height: 1.5; }
 .mini-balance { display: grid; align-content: center; gap: 3px; padding: 10px 12px; background: var(--green-soft); border-radius: 10px; }
 .mini-balance span { color: #638078; font-size: 9px; text-transform: uppercase; }
 .mini-balance strong { color: var(--green-dark); font-family: Georgia, serif; font-size: 18px; font-weight: 500; }
+.mini-balance.success, .mini-balance.payment-state.pagado { background: #e5f5ef; border: 1px solid #c5e8dc; }
+.mini-balance.payment-state.parcial { background: var(--amber-soft); border: 1px solid #eedcae; }
+.mini-balance.payment-state.pendiente { background: var(--coral-soft); border: 1px solid #efcec8; }
+.mini-balance.payment-state.parcial strong { color: #956a16; }
+.mini-balance.payment-state.pendiente strong { color: #a64f44; }
+.financial-overview { align-items: stretch; }
+.financial-subsection { margin-top: 5px; }
+.investigator-financial-editor { display: grid; gap: 11px; }
+.investigator-financial-card { overflow: hidden; background: #fafbf8; border: 1px solid #dfe5df; border-radius: 13px; }
+.investigator-financial-card > header { display: flex; align-items: center; justify-content: space-between; gap: 14px; padding: 11px 13px; background: #eff5f1; border-bottom: 1px solid #dfe5df; }
+.investigator-financial-card > header > div { display: grid; gap: 2px; }
+.investigator-financial-card > header > div:last-child { justify-items: end; }
+.investigator-financial-card > header span { color: #72857f; font-size: 8px; letter-spacing: .05em; text-transform: uppercase; }
+.investigator-financial-card > header strong { color: #2c554c; font-size: 11px; }
+.investigator-financial-card > .form-grid { padding: 13px; }
+.seller-avatar { color: #845f18; background: var(--amber-soft); }
 .section-heading { display: flex; align-items: center; justify-content: space-between; gap: 15px; padding-top: 4px; border-top: 1px solid #ebe9e3; }
 .section-heading h3 { margin: 17px 0 3px; font-family: Georgia, serif; font-size: 18px; font-weight: 500; }
 .section-heading p { margin: 0; color: var(--muted); font-size: 10px; }

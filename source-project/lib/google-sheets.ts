@@ -10,9 +10,10 @@ import type {
   InvestigatorInstallment,
   InvestigatorPaymentMode,
   JournalAccess,
+  Seller,
 } from "./types";
 
-const REQUIRED_SCHEMA_VERSION = 4;
+const REQUIRED_SCHEMA_VERSION = 5;
 
 export interface GoogleSheetsSnapshot {
   schemaVersion: number;
@@ -20,6 +21,7 @@ export interface GoogleSheetsSnapshot {
   serverTime: string;
   records: EditorialRecord[];
   investigators: Investigator[];
+  sellers: Seller[];
   auditLog: AuditEntry[];
   deletedRecords: DeletedRecord[];
 }
@@ -32,6 +34,7 @@ interface ApiResponse extends Partial<GoogleSheetsSnapshot> {
   recordCount?: number;
   paymentCount?: number;
   investigatorCount?: number;
+  sellerCount?: number;
   clientCount?: number;
   assignmentCount?: number;
   snapshot?: GoogleSheetsSnapshot;
@@ -237,6 +240,12 @@ const normalizeRecord = (record: EditorialRecord): EditorialRecord => {
   const currentAssignment = investigatorHistory.find((item) => item.isCurrent) || investigatorHistory.at(-1);
   const previousAssignment = [...investigatorHistory].reverse().find((item) => item.id !== currentAssignment?.id);
   const currentPaid = currentAssignment?.installments.reduce((sum, item) => sum + item.paidAmount, 0) || 0;
+  const clientPayments = normalizeClientPayments(record);
+  const clientTotal = Math.max(0, Number(record.clientTotal) || 0);
+  const receivedFromClient = clientPayments.reduce(
+    (sum, payment) => sum + (payment.amount > 0 ? Math.min(payment.paidAmount, payment.amount) : payment.paidAmount),
+    0,
+  );
   return {
     ...record,
     operationalStatus: record.operationalStatus || "Normal",
@@ -265,13 +274,20 @@ const normalizeRecord = (record: EditorialRecord): EditorialRecord => {
     clientPhone: record.clientPhone || "",
     clientAddress: record.clientAddress || "",
     clientInstitution: record.clientInstitution || "",
+    clientCountry: record.clientCountry || "",
     clientType: record.clientType || "Existente",
+    contactMedium: record.contactMedium || "",
+    referredBy: record.referredBy || "",
     seller: record.seller || "",
     salesChannel: record.salesChannel || "",
     saleDate: record.saleDate || "",
     salesNotes: record.salesNotes || "",
     driveFiles: Array.isArray(record.driveFiles) ? record.driveFiles : [],
-    clientPayments: normalizeClientPayments(record),
+    clientTotal,
+    outstandingBalance: clientTotal > 0
+      ? Math.max(0, clientTotal - receivedFromClient)
+      : Math.max(0, Number(record.outstandingBalance) || 0),
+    clientPayments,
     sources: Array.isArray(record.sources) ? record.sources : [],
   };
 };
@@ -292,17 +308,56 @@ const normalizeInvestigator = (investigator: Investigator): Investigator => ({
   updatedAt: investigator.updatedAt || new Date().toISOString(),
 });
 
-export const normalizeAppData = (data: AppData): AppData => ({
-  ...data,
-  version: 6,
-  records: Array.isArray(data.records) ? data.records.map(normalizeRecord) : [],
-  investigators: Array.isArray(data.investigators) ? data.investigators.map(normalizeInvestigator) : [],
-  auditLog: Array.isArray(data.auditLog) ? data.auditLog : [],
-  deletedRecords: Array.isArray(data.deletedRecords) ? data.deletedRecords : [],
-  googleSheets: data.googleSheets
-    ? { ...emptyGoogleSheetsConfig(), ...data.googleSheets }
-    : undefined,
+const normalizeSeller = (seller: Seller): Seller => ({
+  ...seller,
+  name: seller.name || "",
+  documentId: seller.documentId || "",
+  email: seller.email || "",
+  phone: seller.phone || "",
+  startDate: seller.startDate || "",
+  endDate: seller.endDate || "",
+  notes: seller.notes || "",
+  active: seller.active !== false,
+  createdAt: seller.createdAt || new Date().toISOString(),
+  updatedAt: seller.updatedAt || new Date().toISOString(),
 });
+
+export const normalizeAppData = (data: AppData): AppData => {
+  const records = Array.isArray(data.records) ? data.records.map(normalizeRecord) : [];
+  const sellers = Array.isArray(data.sellers) ? data.sellers.map(normalizeSeller) : [];
+  const known = new Set(sellers.map((seller) => seller.name.toLocaleUpperCase("es")));
+  records.forEach((record) => {
+    const name = record.seller.trim();
+    if (!name || known.has(name.toLocaleUpperCase("es"))) return;
+    const now = record.updatedAt || new Date().toISOString();
+    sellers.push({
+      id: `${record.id || "legacy"}-seller`,
+      name,
+      documentId: "",
+      email: "",
+      phone: "",
+      startDate: "",
+      endDate: "",
+      notes: "Migrado desde procesos existentes",
+      active: true,
+      createdAt: record.createdAt || now,
+      updatedAt: now,
+    });
+    known.add(name.toLocaleUpperCase("es"));
+  });
+  return {
+    ...data,
+    version: 7,
+    records,
+    investigators: Array.isArray(data.investigators) ? data.investigators.map(normalizeInvestigator) : [],
+    sellers: sellers.sort((a, b) => a.name.localeCompare(b.name, "es")),
+    auditLog: Array.isArray(data.auditLog) ? data.auditLog : [],
+    deletedRecords: Array.isArray(data.deletedRecords) ? data.deletedRecords : [],
+    googleSheets: data.googleSheets
+      ? { ...emptyGoogleSheetsConfig(), ...data.googleSheets }
+      : undefined,
+  };
+};
 
 export const isValidWebAppUrl = (value: string) => {
   try {
@@ -359,6 +414,18 @@ const mergeInvestigators = (local: Investigator[], remote: Investigator[]) => {
   return [...merged.values()].sort((a, b) => a.name.localeCompare(b.name, "es"));
 };
 
+const mergeSellers = (local: Seller[], remote: Seller[]) => {
+  const merged = new Map<string, Seller>();
+  [...remote, ...local].forEach((raw) => {
+    const item = normalizeSeller(raw);
+    if (!item.id && !item.name) return;
+    const key = item.id || item.name.toLocaleUpperCase("es");
+    const current = merged.get(key);
+    if (!current || isoTime(item.updatedAt) >= isoTime(current.updatedAt)) merged.set(key, item);
+  });
+  return [...merged.values()].sort((a, b) => a.name.localeCompare(b.name, "es"));
+};
+
 const mergeDeleted = (local: DeletedRecord[], remote: DeletedRecord[]) => {
   const merged = new Map<string, DeletedRecord>();
   [...remote, ...local].forEach((item) => {
@@ -401,6 +468,7 @@ export const mergeGoogleSnapshot = (
     ...local,
     records: [...records.values()].sort((a, b) => a.client.localeCompare(b.client, "es")),
     investigators: mergeInvestigators(local.investigators || [], remote.investigators || []),
+    sellers: mergeSellers(local.sellers || [], remote.sellers || []),
     auditLog: mergeAudit(local.auditLog, remote.auditLog || []),
     deletedRecords,
   });
@@ -471,6 +539,7 @@ const responseSnapshot = (result: ApiResponse): GoogleSheetsSnapshot => ({
   serverTime: result.serverTime || new Date().toISOString(),
   records: Array.isArray(result.records) ? result.records.map(normalizeRecord) : [],
   investigators: Array.isArray(result.investigators) ? result.investigators.map(normalizeInvestigator) : [],
+  sellers: Array.isArray(result.sellers) ? result.sellers.map(normalizeSeller) : [],
   auditLog: Array.isArray(result.auditLog) ? result.auditLog : [],
   deletedRecords: Array.isArray(result.deletedRecords) ? result.deletedRecords : [],
 });
@@ -482,6 +551,7 @@ export const testGoogleSheetsConnection = async (config: GoogleSheetsConfig) => 
     records: Number(result.recordCount || 0),
     payments: Number(result.paymentCount || 0),
     investigators: Number(result.investigatorCount || 0),
+    sellers: Number(result.sellerCount || 0),
     clients: Number(result.clientCount || 0),
     assignments: Number(result.assignmentCount || 0),
     schemaVersion: Number(result.schemaVersion || 0),
@@ -526,6 +596,7 @@ export const syncGoogleSheets = async (source: AppData): Promise<SyncResult> => 
         baseRevision: remote.revision,
         records: recordsForSync(merged.records, config.includeCredentials),
         investigators: merged.investigators || [],
+        sellers: merged.sellers || [],
         auditLog: merged.auditLog,
         deletedRecords: merged.deletedRecords || [],
       });
@@ -534,7 +605,7 @@ export const syncGoogleSheets = async (source: AppData): Promise<SyncResult> => 
       return {
         data: normalizeAppData({
           ...merged,
-          version: 6,
+          version: 7,
           googleSheets: { ...config, remoteRevision, lastSyncAt },
         }),
         remoteRevision,

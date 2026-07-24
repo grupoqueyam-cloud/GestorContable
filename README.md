@@ -41,13 +41,15 @@ La URL de Apps Script puede estar publicada en `cloud-config.json`. La clave `SY
 - Formato único con todas las secciones del proceso.
 - Control de contratos con fecha de inicio obligatoria, fecha de fin opcional y enlace al documento.
 - Catálogo central de investigadores y selector de responsables.
+- Catálogo central de vendedores y selector de vendedor activo.
 - Historial completo de todos los investigadores que han participado en cada proceso.
 - Procesos agrupados por investigador, incluidas asignaciones actuales e históricas.
 - Modalidad de pago del investigador: pago único o dos abonos, con valores, fechas y estados independientes.
 - Estado editorial con avance automático: por asignar/pendiente 0 %, elaboración 25 %, enviado a la revista 50 %, revisión pares 75 % y publicado/finalizado 100 %.
-- Producto desplegable: Latindex, Scielo, Scopus, WoS, Tesis pregrado, Monografía, Tesis Doctoral, Tesis Postgrado o Fast Track.
-- Indexación desplegable: Latindex, Scielo, Q4, Q3, Q2, Q1, Tesis pregrado, Monografía, Tesis Doctoral, Tesis Postgrado o Fast Track.
-- Tipo de cliente: nuevo, existente o recomendado.
+- Producto desplegable: Latindex, Scielo, Scopus, WoS, Tesis pregrado, Monografía, Tesis Doctoral, Tesis Postgrado, Fast Track, Scielo FastTrack o Latindex FastTrack.
+- Indexación desplegable: Latindex, Scielo, Q4, Q3, Q2, Q1, Tesis pregrado, Monografía, Tesis Doctoral, Tesis Postgrado, Fast Track, Scielo FastTrack o Latindex FastTrack.
+- Tipo de cliente: nuevo, existente o recomendado. Los clientes nuevos permiten registrar el medio de contacto y las recomendaciones permiten identificar a quien lo recomendó.
+- País de procedencia del cliente.
 - Registro de vendedor, fecha, canal e información de ventas.
 - Canales de venta: Facebook, Instagram, TikTok, Recomendación, Fidelización o WhatsApp.
 - Varias revistas por proceso, cada una con enlace, usuario y contraseña.
@@ -57,7 +59,7 @@ La URL de Apps Script puede estar publicada en `cloud-config.json`. La clave `SY
 - Archivos enlazados desde Google Drive con vista previa cuando Drive lo permite.
 - Prioridad operativa: normal, urgente, estancado o espera del cliente.
 - Avance gráfico entre 0 y 100 %.
-- Pagos del cliente, cuotas, saldos y próximo vencimiento.
+- Pagos del cliente, cuotas, saldos y próximo vencimiento. Los abonos reales alimentan recaudación y se descuentan automáticamente de cartera, incluso si un registro antiguo conservaba un estado incorrecto.
 - Recuperación y antigüedad de cartera.
 - Asignación y pago de investigadores.
 - Alertas por pagos o fechas vencidas.
@@ -86,7 +88,8 @@ Cada proceso puede contener:
 - Investigador actual e historial ilimitado de responsables anteriores, cada uno con inicio y fin de su asignación.
 - Fecha de inicio y fin del contrato, además de las fechas del proceso y aceptación.
 - Honorarios con modalidad de pago único o dos abonos por cada investigador, además de su factura.
-- Vendedor, canal, fecha de venta, tipo de cliente e información comercial.
+- Vendedor seleccionado desde el catálogo, canal, fecha de venta, tipo de cliente e información comercial.
+- País, medio de contacto y persona que recomendó al cliente, cuando corresponda.
 - Número de contrato, enlace del contrato y orden de producción.
 - Total contratado con el cliente.
 - Correo, documento, teléfono, dirección e institución del cliente.
@@ -153,10 +156,10 @@ https://grupoqueyam-cloud.github.io/GestorContable/
 2. Abra **Extensiones → Apps Script** en la misma hoja que ya utiliza.
 3. Reemplace completamente el contenido anterior de `Code.gs` con `google-apps-script/Code.gs` de este paquete.
 4. Guarde y ejecute la función `configurarHojas`.
-5. La migración conserva procesos, pagos, clientes, contratos, credenciales, revistas e historiales existentes. Agrega las columnas comerciales y de valor pagado sin borrar ni reordenar los datos anteriores.
+5. La migración conserva procesos, pagos, clientes, contratos, credenciales, revistas e historiales existentes. El esquema 5 agrega las columnas nuevas al final y crea el catálogo de vendedores sin borrar ni reordenar las columnas anteriores.
 6. Los investigadores actuales y anteriores existentes se incorporan automáticamente al catálogo y al historial de su proceso. Cuando el archivo anterior no contiene honorarios o fechas del responsable anterior, esos datos quedan marcados para revisión sin inventar valores de pago.
 7. El valor anterior pagado al investigador se distribuye, sin perderlo, entre los dos abonos del registro migrado. Después puede cambiar la modalidad a pago único.
-8. Los pagos antiguos del cliente marcados como `pagado` reciben automáticamente el mismo importe en `Valor pagado`, evitando que una cuenta totalmente cancelada aparezca pendiente.
+8. Los pagos antiguos marcados como `pagado` reciben automáticamente el mismo importe en `Valor pagado`. Los abonos que ya tengan un `Valor pagado` se reconocen aunque su estado antiguo diga pendiente; cartera, recaudación y saldo se recalculan.
 9. Revise manualmente las fechas históricas y la distribución de pagos cuando el contrato anterior no contenga suficiente detalle.
 10. Publique una nueva versión de la misma implementación web como se explica en la sección 9.
 
@@ -211,7 +214,8 @@ La función creará las siguientes pestañas:
 | `Eliminados` | Identificadores borrados y fecha de eliminación. |
 | `Configuracion` | Versión del esquema y número de revisión. |
 | `Investigadores` | Catálogo de responsables, contacto, especialidad, vigencia y carpeta de Drive. |
-| `Clientes` | Vista consolidada de clientes, datos de contacto, clasificación, vendedor, canal, contratos, valores y cartera. |
+| `Vendedores` | Catálogo de vendedores, datos de contacto y vigencia. |
+| `Clientes` | Vista consolidada de clientes, país, origen, referido, clasificación, vendedor, contratos, valores y cartera. |
 | `HistorialInvestigadores` | Una fila por cada investigador que haya participado en un proceso, incluyendo modalidad de pago y abonos. |
 
 No cambie los nombres ni los encabezados de la primera fila. `Clientes` e `HistorialInvestigadores` son vistas consolidadas generadas por el sistema; los cambios deben realizarse desde la aplicación.
@@ -287,8 +291,8 @@ Los Excel se leen temporalmente en la memoria del navegador y sus datos se conso
 ### Crear un proceso
 
 1. Pulse **Nuevo proceso**.
-2. Si el responsable todavía no existe, cierre el formato, abra **Investigadores** y pulse **Nuevo investigador**.
-3. Complete en el formato por secciones los datos del cliente, contrato, producto, indexación, responsable y fechas obligatorias.
+2. Si el responsable o vendedor todavía no existe, cierre el formato y agréguelo desde **Investigadores** o **Vendedores**.
+3. Complete el formato organizado en datos del cliente, vendedor, contrato/editorial, investigador, revistas, información económica, archivos y notas.
 4. Seleccione la prioridad operativa.
 5. Registre tipo de cliente, vendedor, canal de venta, revistas, APC, pagos, factura del investigador y archivos de Drive según corresponda.
 6. Pulse **Guardar en Google Sheets**.
@@ -312,9 +316,9 @@ La pantalla se actualiza solo después de que Google Sheets confirma la escritur
 ### Cartera
 
 - Registre el total contratado.
-- Registre el saldo pendiente.
 - Añada las cuotas y fechas programadas.
-- Actualice el estado a pendiente, parcial, pagado o vencido.
+- Escriba el valor efectivamente recibido en cada abono; el sistema asigna pendiente, parcial o pagado según el valor.
+- El saldo pendiente se calcula como total contratado menos recaudación registrada. Si el pago cubre el total, el saldo y el próximo valor quedan en cero.
 - El dashboard y las gráficas recalculan los indicadores automáticamente.
 
 ### Investigadores
@@ -326,13 +330,19 @@ La pantalla se actualiza solo después de que Google Sheets confirma la escritur
 - Cada asignación permite elegir `Pago único` o `Dos abonos`. En ambos casos se registran valor previsto, valor pagado, fechas y estado.
 - Los investigadores desactivados no se eliminan y permanecen asociados a sus registros históricos.
 
+### Vendedores
+
+- Abra **Vendedores → Nuevo vendedor** para administrar el catálogo.
+- Solo los vendedores activos aparecen al crear o editar procesos; los desactivados permanecen en el historial.
+- Cada ficha agrupa clientes, contratos, valor contratado, recaudación y cartera del vendedor.
+
 ### Búsqueda y filtros
 
 La búsqueda revisa cliente, tema, producto, contrato, revista, investigador, estado, prioridad, institución e indexación. Los filtros permiten combinar estado, prioridad, responsable, indexación, riesgo de cartera y rango de fechas contractuales.
 
 ### Exportación
 
-Desde **Importar y exportar**, pulse **Descargar Excel**. El informe contiene `Procesos`, `Pagos cliente`, `Clientes`, `Investigadores` e `Historial investigadores`.
+Desde **Importar y exportar**, pulse **Descargar Excel**. El informe contiene `Procesos`, `Pagos cliente`, `Clientes`, `Investigadores`, `Vendedores` e `Historial investigadores`.
 
 ## 14. Sincronización y trabajo simultáneo
 
@@ -409,7 +419,7 @@ El valor ingresado debe coincidir exactamente con `SYNC_SECRET`. Revise espacios
 
 ### La aplicación pide actualizar el esquema
 
-El sitio nuevo requiere el esquema 4. Reemplace completamente `Code.gs`, ejecute `configurarHojas` y publique una **nueva versión** de la implementación web. Al abrir la URL `/exec` debe aparecer `"schemaVersion":4`. Después recargue GitHub Pages con `Ctrl + F5`.
+El sitio nuevo requiere el esquema 5. Reemplace completamente `Code.gs`, ejecute `configurarHojas` y publique una **nueva versión** de la implementación web. Al abrir la URL `/exec` debe aparecer `"schemaVersion":5`. Después recargue GitHub Pages con `Ctrl + F5`.
 
 ### Un archivo de Drive no muestra vista previa
 
@@ -451,9 +461,10 @@ El sistema está correctamente configurado cuando:
 - La consola no intenta descargar `src/main.tsx`.
 - `favicon.svg`, los archivos de `assets/` y `cloud-config.json` responden sin error 404.
 - La URL `/exec` acepta la clave.
-- Se crean las ocho pestañas de Google Sheets, incluidas `Clientes`, `Investigadores` e `HistorialInvestigadores`.
+- Se crean las nueve pestañas de Google Sheets, incluidas `Clientes`, `Investigadores`, `Vendedores` e `HistorialInvestigadores`.
 - Los Excel se importan y aparecen en `Procesos`.
 - Un investigador nuevo aparece en el selector del formato de procesos.
+- Un vendedor nuevo aparece en el selector y sus contratos se agrupan en su ficha.
 - Un cliente muestra todos sus contratos y permite crear otro con sus datos precargados.
 - Cada proceso conserva el historial de investigadores y cada asignación permite pago único o dos abonos.
 - Los pagos totalmente cubiertos muestran saldo cero y no aparecen como cartera pendiente.

@@ -14,5 +14,9 @@ test("no incluye almacenamiento local ni una base de datos en GitHub", () => {
   assert.match(app, /20 \* 60 \* 1000/);
   assert.match(app, /Fin del contrato \(opcional\)/);
   assert.match(app, /Tesis Doctoral/);
+  assert.match(app, /Scielo FastTrack/);
+  assert.match(app, /Latindex FastTrack/);
   assert.match(app, /Pago único/);
+  assert.match(app, /Vendedores/);
+  assert.match(app, /País/);
 });

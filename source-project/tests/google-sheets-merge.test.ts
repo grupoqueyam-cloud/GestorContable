@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { mergeGoogleSnapshot, normalizeAppData } from "../lib/google-sheets";
-import { blankRecord, clientBalance, paidByClient, statusProgress } from "../lib/format";
+import { blankRecord, clientBalance, clientPaymentState, paidByClient, statusProgress } from "../lib/format";
 import type { AppData, EditorialRecord } from "../lib/types";
 
 const record = (id: string, client: string, updatedAt: string): EditorialRecord => ({
@@ -14,9 +14,10 @@ const record = (id: string, client: string, updatedAt: string): EditorialRecord 
 });
 
 const base = (records: EditorialRecord[]): AppData => normalizeAppData({
-  version: 6,
+  version: 7,
   records,
   investigators: [],
+  sellers: [],
   auditLog: [],
   deletedRecords: [],
   importedAt: "2026-01-01T00:00:00.000Z",
@@ -27,11 +28,12 @@ test("combina por ID y conserva la version mas reciente", () => {
   const remoteA = record("a", "Cliente remoto antiguo", "2026-01-01T00:00:00.000Z");
   const remoteB = record("b", "Cliente remoto", "2026-03-01T00:00:00.000Z");
   const merged = mergeGoogleSnapshot(local, {
-    schemaVersion: 4,
+    schemaVersion: 5,
     revision: 4,
     serverTime: "2026-03-01T00:00:00.000Z",
     records: [remoteA, remoteB],
     investigators: [],
+    sellers: [],
     auditLog: [],
     deletedRecords: [],
   });
@@ -45,11 +47,12 @@ test("respeta eliminaciones y no borra credenciales de acceso omitidas", () => {
   const localB = record("b", "Eliminar", "2026-02-01T00:00:00.000Z");
   const remoteA = { ...localA, client: "Cliente actualizado", username: "", password: "", journalAccesses: localA.journalAccesses.map((item) => ({ ...item, username: "", password: "" })), updatedAt: "2026-03-01T00:00:00.000Z" };
   const merged = mergeGoogleSnapshot(base([localA, localB]), {
-    schemaVersion: 4,
+    schemaVersion: 5,
     revision: 8,
     serverTime: "2026-04-01T00:00:00.000Z",
     records: [remoteA],
     investigators: [],
+    sellers: [],
     auditLog: [],
     deletedRecords: [{ id: "b", deletedAt: "2026-04-01T00:00:00.000Z" }],
   });
@@ -82,11 +85,12 @@ test("migra campos anteriores al formato unificado", () => {
     version: 2,
     records: [legacy],
     investigators: [],
+    sellers: [],
     auditLog: [],
     deletedRecords: [],
     importedAt: "2025-01-01T00:00:00.000Z",
   });
-  assert.equal(normalized.version, 6);
+  assert.equal(normalized.version, 7);
   assert.equal(normalized.records[0].contractStartDate, "2025-02-01");
   assert.equal(normalized.records[0].contractEndDate, "");
   assert.equal(normalized.records[0].hasApc, true);
@@ -106,11 +110,12 @@ test("agrupa y conserva el investigador con la actualización más reciente", ()
   const local = base([]);
   local.investigators = [{ id: "i-1", name: "Ana Pérez", documentId: "", email: "", phone: "", specialty: "Local", startDate: "", endDate: "", driveFolderUrl: "", notes: "", active: true, createdAt: "2026-01-01T00:00:00.000Z", updatedAt: "2026-01-01T00:00:00.000Z" }];
   const merged = mergeGoogleSnapshot(local, {
-    schemaVersion: 4,
+    schemaVersion: 5,
     revision: 2,
     serverTime: "2026-02-01T00:00:00.000Z",
     records: [],
     investigators: [{ ...local.investigators[0], specialty: "Scopus", updatedAt: "2026-02-01T00:00:00.000Z" }],
+    sellers: [],
     auditLog: [],
     deletedRecords: [],
   });
@@ -239,6 +244,46 @@ test("migra pagos antiguos marcados como pagados al nuevo valor pagado", () => {
   const normalized = normalizeAppData(base([process])).records[0];
   assert.equal(normalized.clientPayments[0].paidAmount, 300);
   assert.equal(clientBalance(normalized), 0);
+});
+
+test("descuenta un abono aunque el estado recibido todavía diga pendiente", () => {
+  const process = record("stale-payment-status", "Cliente abono", "2026-06-01T00:00:00.000Z");
+  process.clientTotal = 1000;
+  process.outstandingBalance = 1000;
+  process.clientPayments = [{
+    id: "partial-payment",
+    concept: "Abono",
+    scheduledDate: "",
+    paidDate: "2026-06-01",
+    amount: 1000,
+    paidAmount: 275,
+    status: "pendiente",
+    note: "",
+  }];
+  assert.equal(paidByClient(process), 275);
+  assert.equal(clientBalance(process), 725);
+  assert.equal(clientPaymentState(process), "parcial");
+
+  const normalized = normalizeAppData(base([process])).records[0];
+  assert.equal(normalized.clientPayments[0].status, "parcial");
+  assert.equal(normalized.outstandingBalance, 725);
+});
+
+test("migra vendedor y conserva país y origen del cliente", () => {
+  const process = record("seller-migration", "Cliente internacional", "2026-06-01T00:00:00.000Z");
+  process.seller = "María Comercial";
+  process.clientCountry = "Colombia";
+  process.clientType = "Nuevo";
+  process.contactMedium = "Recomendación";
+  process.referredBy = "Cliente anterior";
+  const normalized = normalizeAppData({
+    ...base([process]),
+    sellers: [],
+  });
+  assert.equal(normalized.sellers[0].name, "María Comercial");
+  assert.equal(normalized.records[0].clientCountry, "Colombia");
+  assert.equal(normalized.records[0].contactMedium, "Recomendación");
+  assert.equal(normalized.records[0].referredBy, "Cliente anterior");
 });
 
 test("aplica los porcentajes editoriales solicitados", () => {

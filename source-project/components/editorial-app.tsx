@@ -73,7 +73,9 @@ import {
   blankInvestigatorAssignment,
   blankJournalAccess,
   blankRecord,
+  blankSeller,
   clientBalance,
+  clientPaymentState,
   daysFromToday,
   formatCurrency,
   formatDate,
@@ -104,6 +106,7 @@ import type {
   InvestigatorAssignment,
   InvestigatorInstallment,
   JournalAccess,
+  Seller,
   ViewKey,
 } from "../lib/types";
 
@@ -119,13 +122,14 @@ const EMPTY_FILTERS: Filters = {
 };
 
 const PIE_COLORS = ["#2f8f7f", "#e3aa3d", "#d66d5d", "#5d7fa3", "#81907d", "#725ea8"];
-const ACADEMIC_PRODUCT_OPTIONS = ["Tesis pregrado", "Monografía", "Tesis Doctoral", "Tesis Postgrado", "Fast Track"];
+const ACADEMIC_PRODUCT_OPTIONS = ["Tesis pregrado", "Monografía", "Tesis Doctoral", "Tesis Postgrado", "Fast Track", "Scielo FastTrack", "Latindex FastTrack"];
 const INDEXATION_OPTIONS = ["Latindex", "Scielo", "Q4", "Q3", "Q2", "Q1", ...ACADEMIC_PRODUCT_OPTIONS];
 const PRODUCT_OPTIONS = ["Latindex", "Scielo", "Scopus", "WoS", ...ACADEMIC_PRODUCT_OPTIONS];
 const EDITORIAL_STATUS_OPTIONS = ["Por asignar", "Pendiente", "Elaboración", "Enviado a la revista", "Revisión Pares", "Espera del cliente", "Publicado", "Finalizado"];
 const OPERATIONAL_OPTIONS = ["Normal", "Urgente", "Estancado", "Espera del cliente"] as const;
 const CLIENT_TYPE_OPTIONS = ["Nuevo", "Existente", "Recomendado"];
 const SALES_CHANNEL_OPTIONS = ["Facebook", "Instagram", "TikTok", "Recomendación", "Fidelización", "WhatsApp"];
+const CONTACT_MEDIUM_OPTIONS = ["Instagram", "Facebook", "TikTok", "WhatsApp", "Recomendación"];
 
 const NAV_ITEMS: { key: ViewKey; label: string; icon: typeof LayoutDashboard }[] = [
   { key: "dashboard", label: "Resumen ejecutivo", icon: LayoutDashboard },
@@ -133,6 +137,7 @@ const NAV_ITEMS: { key: ViewKey; label: string; icon: typeof LayoutDashboard }[]
   { key: "processes", label: "Procesos editoriales", icon: ClipboardList },
   { key: "portfolio", label: "Recuperación de cartera", icon: WalletCards },
   { key: "investigators", label: "Investigadores", icon: UsersRound },
+  { key: "sellers", label: "Vendedores", icon: BriefcaseBusiness },
   { key: "contracts", label: "Contratos", icon: FileText },
   { key: "alerts", label: "Alertas y vencimientos", icon: Bell },
   { key: "google", label: "Google Sheets", icon: Cloud },
@@ -263,9 +268,10 @@ function CloudAuthScreen({ onReady }: { onReady: (data: AppData) => void }) {
       };
       const snapshot = await pullGoogleSheets(config);
       onReady(normalizeAppData({
-        version: 6,
+        version: 7,
         records: snapshot.records,
         investigators: snapshot.investigators,
+        sellers: snapshot.sellers,
         auditLog: snapshot.auditLog,
         deletedRecords: snapshot.deletedRecords,
         importedAt: snapshot.serverTime,
@@ -391,6 +397,7 @@ const drivePreviewUrl = (value: string) => {
 function RecordModal({
   source,
   investigators,
+  sellers,
   credentialsEnabled,
   onClose,
   onSave,
@@ -398,6 +405,7 @@ function RecordModal({
 }: {
   source: EditorialRecord;
   investigators: Investigator[];
+  sellers: Seller[];
   credentialsEnabled: boolean;
   onClose: () => void;
   onSave: (record: EditorialRecord, addAnotherContract?: boolean) => void;
@@ -537,6 +545,11 @@ function RecordModal({
     });
     return values.sort((a, b) => a.localeCompare(b, "es"));
   }, [investigators, draft.investigator, draft.investigatorHistory]);
+  const sellerNames = useMemo(() => {
+    const values = sellers.filter((item) => item.active).map((item) => item.name).filter(Boolean);
+    if (draft.seller && !values.includes(draft.seller)) values.push(draft.seller);
+    return values.sort((a, b) => a.localeCompare(b, "es"));
+  }, [sellers, draft.seller]);
 
   const submit = (event: FormEvent) => {
     event.preventDefault();
@@ -611,12 +624,18 @@ function RecordModal({
     const driveFiles = draft.driveFiles.filter((item) => item.name.trim() || item.url.trim());
     const clientPayments = draft.clientPayments.map((payment) => {
       const amount = Math.max(0, Number(payment.amount) || 0);
-      const paidAmount = Math.max(0, Number(payment.paidAmount) || 0);
+      const rawPaid = Math.max(0, Number(payment.paidAmount) || 0);
+      const paidAmount = amount > 0 ? Math.min(rawPaid, amount) : rawPaid;
       const status: ClientPayment["status"] = paidAmount > 0
         ? amount <= 0 || paidAmount >= amount ? "pagado" : "parcial"
         : payment.status === "vencido" ? "vencido" : "pendiente";
       return { ...payment, amount, paidAmount, status };
     });
+    const clientTotal = Math.max(0, Number(draft.clientTotal) || 0);
+    const receivedFromClient = clientPayments.reduce((sum, payment) => sum + payment.paidAmount, 0);
+    const outstandingBalance = clientTotal > 0
+      ? Math.max(0, clientTotal - receivedFromClient)
+      : Math.max(0, Number(draft.outstandingBalance) || 0);
     const primary = journalAccesses[0];
     const submitter = (event.nativeEvent as SubmitEvent).submitter as HTMLElement | null;
     onSave({
@@ -625,6 +644,11 @@ function RecordModal({
       journalAccesses,
       driveFiles,
       clientPayments,
+      clientTotal,
+      outstandingBalance,
+      nextPaymentAmount: outstandingBalance <= 0
+        ? 0
+        : Math.min(Math.max(0, Number(draft.nextPaymentAmount) || outstandingBalance), outstandingBalance),
       journal: primary?.journal || "",
       journalLink: primary?.journalLink || "",
       loginLink: primary?.loginLink || "",
@@ -661,19 +685,34 @@ function RecordModal({
               <label>Correo<input type="email" value={draft.clientEmail} onChange={(event) => set("clientEmail", event.target.value)} /></label>
               <label>Teléfono<input value={draft.clientPhone} onChange={(event) => set("clientPhone", event.target.value)} /></label>
               <label>Dirección<input value={draft.clientAddress} onChange={(event) => set("clientAddress", event.target.value)} /></label>
+              <label>País de procedencia<input value={draft.clientCountry} onChange={(event) => set("clientCountry", event.target.value)} placeholder="Ej. Ecuador" /></label>
+              <label>Tipo de cliente<select value={draft.clientType} onChange={(event) => {
+                const clientType = event.target.value;
+                setDraft((current) => ({
+                  ...current,
+                  clientType,
+                  contactMedium: clientType === "Recomendado" ? "Recomendación" : clientType === "Nuevo" ? current.contactMedium : "",
+                  referredBy: clientType === "Recomendado" || (clientType === "Nuevo" && current.contactMedium === "Recomendación") ? current.referredBy : "",
+                }));
+              }}>{CLIENT_TYPE_OPTIONS.map((value) => <option key={value}>{value}</option>)}</select></label>
+              {draft.clientType === "Nuevo" && <label>Medio de contacto<select value={draft.contactMedium} onChange={(event) => {
+                const contactMedium = event.target.value;
+                setDraft((current) => ({ ...current, contactMedium, referredBy: contactMedium === "Recomendación" ? current.referredBy : "" }));
+              }}><option value="">Seleccione…</option>{CONTACT_MEDIUM_OPTIONS.map((value) => <option key={value}>{value}</option>)}</select></label>}
+              {(draft.clientType === "Recomendado" || draft.contactMedium === "Recomendación") && <label>¿Quién lo recomendó?<input value={draft.referredBy} onChange={(event) => set("referredBy", event.target.value)} placeholder="Nombre de la persona o cliente" /></label>}
             </div>
             <p className="field-help">Los documentos, contratos, órdenes y facturas se guardan como texto para conservar ceros a la izquierda.</p>
           </section>
 
           <section className="record-section">
-            <div className="record-section-heading"><div><span>02</span><h3>Ventas y origen del cliente</h3></div><p>Responsable comercial, canal de captación y clasificación del cliente.</p></div>
+            <div className="record-section-heading"><div><span>02</span><h3>Datos del vendedor</h3></div><p>Responsable comercial y trazabilidad de la venta.</p></div>
             <div className="form-grid three-cols">
-              <label>Tipo de cliente<select value={draft.clientType} onChange={(event) => set("clientType", event.target.value)}>{CLIENT_TYPE_OPTIONS.map((value) => <option key={value}>{value}</option>)}</select></label>
-              <label>Vendedor<input value={draft.seller} onChange={(event) => set("seller", event.target.value)} placeholder="Nombre del vendedor" /></label>
+              <label>Vendedor<select value={draft.seller} onChange={(event) => set("seller", event.target.value)}><option value="">Seleccione…</option>{sellerNames.map((value) => <option key={value}>{value}</option>)}</select></label>
               <label>Canal de venta<select value={draft.salesChannel} onChange={(event) => set("salesChannel", event.target.value)}><option value="">Seleccione…</option>{SALES_CHANNEL_OPTIONS.map((value) => <option key={value}>{value}</option>)}</select></label>
               <label>Fecha de venta<input type="date" value={draft.saleDate} onChange={(event) => set("saleDate", event.target.value)} /></label>
               <label className="span-2">Información de ventas<textarea rows={3} value={draft.salesNotes} onChange={(event) => set("salesNotes", event.target.value)} placeholder="Campaña, recomendador, condiciones comerciales u observaciones" /></label>
             </div>
+            {sellers.length === 0 && <p className="field-help">Registre primero a los responsables desde el módulo Vendedores para habilitar el desplegable.</p>}
           </section>
 
           <section className="record-section">
@@ -681,7 +720,7 @@ function RecordModal({
             <div className="form-grid three-cols">
               <label>N.º de contrato<input inputMode="numeric" placeholder="Ej. 000150" value={draft.contractNumber} onChange={(event) => set("contractNumber", event.target.value)} /></label>
               <label>Inicio del contrato *<input type="date" value={draft.contractStartDate} onChange={(event) => set("contractStartDate", event.target.value)} required /></label>
-              <label>Fin del contrato (opcional)<input type="date" value={draft.contractEndDate} min={draft.contractStartDate} onChange={(event) => set("contractEndDate", event.target.value)} /></label>
+              <label>Fin del contrato<input type="date" value={draft.contractEndDate} min={draft.contractStartDate} onChange={(event) => set("contractEndDate", event.target.value)} /></label>
               <label className="span-2">Link del contrato<input type="url" value={draft.contractLink} onChange={(event) => set("contractLink", event.target.value)} placeholder="https://drive.google.com/..." /></label>
               <label>Orden de producción<input inputMode="numeric" placeholder="Ej. 000045" value={draft.productionOrder} onChange={(event) => set("productionOrder", event.target.value)} /></label>
               <label className="span-3">Tema / título<textarea value={draft.topic} onChange={(event) => set("topic", event.target.value)} rows={3} /></label>
@@ -695,7 +734,7 @@ function RecordModal({
           </section>
 
           <section className="record-section">
-            <div className="record-section-heading"><div><span>04</span><h3>Investigadores e historial del proceso</h3></div><p>Cada asignación conserva responsable, periodo y modalidad de pago.</p></div>
+            <div className="record-section-heading"><div><span>04</span><h3>Información del investigador</h3></div><p>Cada asignación conserva responsable, periodo y observaciones del proceso.</p></div>
             <div className="section-heading"><div><h3>Historial de asignaciones</h3><p>Al cambiar de responsable, agregue otra asignación; las anteriores no se reemplazan.</p></div><button type="button" className="button secondary small" onClick={addAssignment}><Plus size={15} /> Añadir investigador</button></div>
             {investigators.length === 0 && <p className="field-help assignment-help">Registre primero al equipo desde el módulo Investigadores. Puede dejar el proceso en estado “Por asignar”.</p>}
             <div className="assignment-history-editor">
@@ -706,33 +745,17 @@ function RecordModal({
                   <label>Investigador *<select value={assignment.investigator} onChange={(event) => updateAssignment(assignment.id, { investigator: event.target.value })}><option value="">Seleccione…</option>{investigatorNames.map((value) => <option key={value}>{value}</option>)}</select></label>
                   <label>Inicio de asignación *<input type="date" value={assignment.startDate} onChange={(event) => updateAssignment(assignment.id, { startDate: event.target.value })} /></label>
                   <label>Fin de asignación *<input type="date" min={assignment.startDate} value={assignment.endDate} onChange={(event) => updateAssignment(assignment.id, { endDate: event.target.value })} /></label>
-                  <label>Modalidad de pago<select value={assignment.paymentMode} onChange={(event) => updateAssignmentPaymentMode(assignment.id, event.target.value as InvestigatorAssignment["paymentMode"])}><option value="dos_abonos">Dos abonos</option><option value="unico">Pago único</option></select></label>
-                  <label>Honorario acordado (USD)<DecimalInput value={assignment.agreedPayment} onValue={(value) => updateAssignmentPayment(assignment.id, value)} /></label>
-                  <label>Observación de la asignación<input value={assignment.notes} onChange={(event) => updateAssignment(assignment.id, { notes: event.target.value })} placeholder="Motivo de cambio, alcance u observación" /></label>
-                </div>
-                <div className="investigator-installments">
-                  {assignment.installments.filter((installment) => assignment.paymentMode !== "unico" || installment.number === 1).map((installment) => <div className="installment-card" key={installment.number}>
-                    <div className="installment-title"><span>{assignment.paymentMode === "unico" ? "Pago único" : `Abono ${installment.number} de 2`}</span><strong>{formatCurrency(installment.paidAmount)} / {formatCurrency(installment.amount)}</strong></div>
-                    <div className="form-grid three-cols">
-                      <label>Valor previsto<DecimalInput value={installment.amount} onValue={(amount) => updateInstallment(assignment.id, installment.number, { amount })} /></label>
-                      <label>Valor pagado<DecimalInput value={installment.paidAmount} onValue={(paidAmount) => updateInstallment(assignment.id, installment.number, { paidAmount, status: paidAmount <= 0 ? "pendiente" : paidAmount >= installment.amount ? "pagado" : "parcial" })} /></label>
-                      <label>Estado<select value={installment.status} onChange={(event) => { const status = event.target.value as InvestigatorInstallment["status"]; updateInstallment(assignment.id, installment.number, { status, paidAmount: status === "pagado" ? installment.amount : status === "pendiente" ? 0 : installment.paidAmount, paidDate: status === "pagado" ? installment.paidDate || new Date().toISOString().slice(0, 10) : status === "pendiente" ? "" : installment.paidDate }); }}><option value="pendiente">Pendiente</option><option value="parcial">Parcial</option><option value="pagado">Pagado</option></select></label>
-                      <label>Fecha prevista<input type="date" value={installment.scheduledDate} onChange={(event) => updateInstallment(assignment.id, installment.number, { scheduledDate: event.target.value })} /></label>
-                      <label>Fecha pagada<input type="date" value={installment.paidDate} onChange={(event) => updateInstallment(assignment.id, installment.number, { paidDate: event.target.value })} /></label>
-                    </div>
-                  </div>)}
+                  <label className="span-3">Observación de la asignación<input value={assignment.notes} onChange={(event) => updateAssignment(assignment.id, { notes: event.target.value })} placeholder="Motivo de cambio, alcance u observación" /></label>
                 </div>
               </article>)}
             </div>
           </section>
 
           <section className="record-section">
-            <div className="record-section-heading"><div><span>05</span><h3>Indexación, revistas y APC</h3></div><p>Puede registrar varias revistas y credenciales dentro del mismo proceso.</p></div>
+            <div className="record-section-heading"><div><span>05</span><h3>Indexación y revistas</h3></div><p>Puede registrar varias revistas y credenciales dentro del mismo proceso.</p></div>
             <div className="form-grid three-cols">
               <label>Indexación *<select value={draft.indexation} onChange={(event) => set("indexation", event.target.value)} required><option value="">Seleccione…</option>{draft.indexation && !INDEXATION_OPTIONS.includes(draft.indexation) && <option value={draft.indexation}>{draft.indexation} (importada)</option>}{INDEXATION_OPTIONS.map((value) => <option key={value}>{value}</option>)}</select></label>
               <label>Fecha de aceptación<input type="date" value={draft.acceptanceDate} onChange={(event) => set("acceptanceDate", event.target.value)} /></label>
-              <label className="apc-toggle"><span>APC</span><span className="toggle-row"><input type="checkbox" checked={draft.hasApc} onChange={(event) => { set("hasApc", event.target.checked); if (!event.target.checked) set("apcValue", 0); }} /><strong>{draft.hasApc ? "Con APC" : "Sin APC"}</strong></span></label>
-              {draft.hasApc && <label>Valor APC (USD)<DecimalInput value={draft.apcValue} onValue={(value) => set("apcValue", value)} /></label>}
             </div>
             <div className="section-heading"><div><h3>Revistas y accesos</h3><p>Agregue una fila por cada revista utilizada.</p></div><button type="button" className="button secondary small" onClick={() => setDraft((current) => ({ ...current, journalAccesses: [...current.journalAccesses, blankJournalAccess()] }))}><Plus size={15} /> Añadir revista</button></div>
             <div className="journal-editor">
@@ -749,19 +772,16 @@ function RecordModal({
           </section>
 
           <section className="record-section">
-            <div className="record-section-heading"><div><span>06</span><h3>Control contable y factura del investigador</h3></div><p>El saldo se calcula con los valores efectivamente pagados y nunca queda pendiente cuando el total está cubierto.</p></div>
-            <div className="form-grid three-cols">
+            <div className="record-section-heading"><div><span>06</span><h3>Información económica consolidada</h3></div><p>Contrato, recaudación, cartera, APC, pagos del cliente y pagos del investigador en una sola sección.</p></div>
+            <div className="form-grid three-cols financial-overview">
               <label>Total contratado al cliente (USD)<DecimalInput value={draft.clientTotal} onValue={(value) => set("clientTotal", value)} /></label>
-              <label>Saldo pendiente confirmado (USD)<DecimalInput value={draft.outstandingBalance || 0} onValue={(value) => set("outstandingBalance", value)} /></label>
-              <div className="mini-balance"><span>Saldo calculado</span><strong>{formatCurrency(clientBalance(draft))}</strong></div>
+              <div className="mini-balance success"><span>Recaudación registrada</span><strong>{formatCurrency(paidByClient(draft))}</strong></div>
+              <div className="mini-balance"><span>Cartera pendiente</span><strong>{formatCurrency(clientBalance(draft))}</strong></div>
+              <div className={`mini-balance payment-state ${clientPaymentState(draft)}`}><span>Estado del contrato</span><strong>{clientPaymentState(draft) === "pagado" ? "Pagado completo" : clientPaymentState(draft) === "parcial" ? "Pago parcial" : "Pendiente de pago"}</strong></div>
               <label>Próximo pago esperado (USD)<DecimalInput value={draft.nextPaymentAmount} onValue={(value) => set("nextPaymentAmount", value)} /></label>
               <label>Fecha del próximo pago<input type="date" value={draft.nextPaymentDate} onChange={(event) => set("nextPaymentDate", event.target.value)} /></label>
-              <span />
-              <label>N.º de factura del investigador<input inputMode="numeric" placeholder="Ej. 000025" value={draft.investigatorInvoiceNumber} onChange={(event) => set("investigatorInvoiceNumber", event.target.value)} /></label>
-              <label>Fecha de factura<input type="date" value={draft.investigatorInvoiceDate} onChange={(event) => set("investigatorInvoiceDate", event.target.value)} /></label>
-              <label>Valor facturado (USD)<DecimalInput value={draft.investigatorInvoiceValue} onValue={(value) => set("investigatorInvoiceValue", value)} /></label>
-              <label className="span-2">Link de factura<input type="url" value={draft.investigatorInvoiceLink} onChange={(event) => set("investigatorInvoiceLink", event.target.value)} placeholder="https://drive.google.com/..." /></label>
-              <label>Estado de factura<select value={draft.investigatorInvoiceStatus} onChange={(event) => set("investigatorInvoiceStatus", event.target.value)}><option>Pendiente</option><option>Emitida</option><option>Pagada</option><option>Anulada</option></select></label>
+              <label className="apc-toggle"><span>APC</span><span className="toggle-row"><input type="checkbox" checked={draft.hasApc} onChange={(event) => { set("hasApc", event.target.checked); if (!event.target.checked) set("apcValue", 0); }} /><strong>{draft.hasApc ? "Con APC" : "Sin APC"}</strong></span></label>
+              {draft.hasApc && <label>Valor APC (USD)<DecimalInput value={draft.apcValue} onValue={(value) => set("apcValue", value)} /></label>}
             </div>
             <div className="section-heading"><div><h3>Pagos del cliente</h3><p>Cronograma e historial de abonos.</p></div><button type="button" className="button secondary small" onClick={() => setDraft((current) => ({ ...current, clientPayments: [...current.clientPayments, blankPayment()] }))}><Plus size={15} /> Añadir pago</button></div>
             <div className="payment-editor">
@@ -774,6 +794,41 @@ function RecordModal({
                 <select aria-label="Estado" value={payment.status} onChange={(event) => { const status = event.target.value as ClientPayment["status"]; updatePayment(payment.id, { status, paidAmount: status === "pagado" ? payment.amount : status === "pendiente" || status === "vencido" ? 0 : payment.paidAmount, paidDate: status === "pagado" || status === "parcial" ? payment.paidDate || new Date().toISOString().slice(0, 10) : "" }); }}><option value="pendiente">Pendiente</option><option value="parcial">Parcial</option><option value="pagado">Pagado</option><option value="vencido">Vencido</option></select>
                 <button type="button" className="icon-button danger" onClick={() => removePayment(payment.id)}><Trash2 size={16} /></button>
               </div>)}
+            </div>
+            <div className="section-heading financial-subsection"><div><h3>Pagos de investigadores</h3><p>Honorario, modalidad y abonos de cada responsable del historial.</p></div></div>
+            <div className="investigator-financial-editor">
+              {draft.investigatorHistory.length === 0 && <p className="muted center">Agregue un investigador en la sección 04 para registrar sus pagos.</p>}
+              {draft.investigatorHistory.map((assignment) => {
+                const paid = assignment.installments.reduce((sum, installment) => sum + installment.paidAmount, 0);
+                return <article className="investigator-financial-card" key={assignment.id}>
+                  <header><div><span>{assignment.isCurrent ? "Responsable actual" : "Responsable histórico"}</span><strong>{assignment.investigator || "Investigador sin seleccionar"}</strong></div><div><span>Pagado</span><strong>{formatCurrency(paid)}</strong></div></header>
+                  <div className="form-grid three-cols">
+                    <label>Modalidad de pago<select value={assignment.paymentMode} onChange={(event) => updateAssignmentPaymentMode(assignment.id, event.target.value as InvestigatorAssignment["paymentMode"])}><option value="dos_abonos">Dos abonos</option><option value="unico">Pago único</option></select></label>
+                    <label>Honorario acordado (USD)<DecimalInput value={assignment.agreedPayment} onValue={(value) => updateAssignmentPayment(assignment.id, value)} /></label>
+                    <div className="mini-balance"><span>Pendiente al investigador</span><strong>{formatCurrency(Math.max(0, assignment.agreedPayment - paid))}</strong></div>
+                  </div>
+                  <div className="investigator-installments">
+                    {assignment.installments.filter((installment) => assignment.paymentMode !== "unico" || installment.number === 1).map((installment) => <div className="installment-card" key={installment.number}>
+                      <div className="installment-title"><span>{assignment.paymentMode === "unico" ? "Pago único" : `Abono ${installment.number} de 2`}</span><strong>{formatCurrency(installment.paidAmount)} / {formatCurrency(installment.amount)}</strong></div>
+                      <div className="form-grid three-cols">
+                        <label>Valor previsto<DecimalInput value={installment.amount} onValue={(amount) => updateInstallment(assignment.id, installment.number, { amount })} /></label>
+                        <label>Valor pagado<DecimalInput value={installment.paidAmount} onValue={(paidAmount) => updateInstallment(assignment.id, installment.number, { paidAmount, status: paidAmount <= 0 ? "pendiente" : paidAmount >= installment.amount ? "pagado" : "parcial" })} /></label>
+                        <label>Estado<select value={installment.status} onChange={(event) => { const status = event.target.value as InvestigatorInstallment["status"]; updateInstallment(assignment.id, installment.number, { status, paidAmount: status === "pagado" ? installment.amount : status === "pendiente" ? 0 : installment.paidAmount, paidDate: status === "pagado" ? installment.paidDate || new Date().toISOString().slice(0, 10) : status === "pendiente" ? "" : installment.paidDate }); }}><option value="pendiente">Pendiente</option><option value="parcial">Parcial</option><option value="pagado">Pagado</option></select></label>
+                        <label>Fecha prevista<input type="date" value={installment.scheduledDate} onChange={(event) => updateInstallment(assignment.id, installment.number, { scheduledDate: event.target.value })} /></label>
+                        <label>Fecha pagada<input type="date" value={installment.paidDate} onChange={(event) => updateInstallment(assignment.id, installment.number, { paidDate: event.target.value })} /></label>
+                      </div>
+                    </div>)}
+                  </div>
+                </article>;
+              })}
+            </div>
+            <div className="section-heading financial-subsection"><div><h3>Factura del investigador</h3><p>Documento y estado contable del responsable actual.</p></div></div>
+            <div className="form-grid three-cols">
+              <label>N.º de factura del investigador<input inputMode="numeric" placeholder="Ej. 000025" value={draft.investigatorInvoiceNumber} onChange={(event) => set("investigatorInvoiceNumber", event.target.value)} /></label>
+              <label>Fecha de factura<input type="date" value={draft.investigatorInvoiceDate} onChange={(event) => set("investigatorInvoiceDate", event.target.value)} /></label>
+              <label>Valor facturado (USD)<DecimalInput value={draft.investigatorInvoiceValue} onValue={(value) => set("investigatorInvoiceValue", value)} /></label>
+              <label className="span-2">Link de factura<input type="url" value={draft.investigatorInvoiceLink} onChange={(event) => set("investigatorInvoiceLink", event.target.value)} placeholder="https://drive.google.com/..." /></label>
+              <label>Estado de factura<select value={draft.investigatorInvoiceStatus} onChange={(event) => set("investigatorInvoiceStatus", event.target.value)}><option>Pendiente</option><option>Emitida</option><option>Pagada</option><option>Anulada</option></select></label>
             </div>
           </section>
 
@@ -863,7 +918,7 @@ function ProcessesTable({ records, onEdit }: { records: EditorialRecord[]; onEdi
                 {show("id") && <td className="mono">{record.id.slice(0, 8)}</td>}
                 {show("client") && <td className="sticky-cell"><button className="client-link" onClick={() => onEdit(record)}>{record.client}<small>{record.contractNumber || "Sin contrato"}</small></button></td>}
                 {show("topic") && <td><span className="truncate-2" title={record.topic}>{record.topic || record.product || "—"}</span></td>}
-                {show("payments") && <td><strong>{formatCurrency(paidByClient(record))}</strong><small className="cell-note">de {formatCurrency(record.clientTotal)}</small></td>}
+                {show("payments") && <td><strong>{formatCurrency(paidByClient(record))}</strong><small className="cell-note">{clientPaymentState(record) === "pagado" ? "Pagado completo" : clientPaymentState(record) === "parcial" ? `Parcial de ${formatCurrency(record.clientTotal)}` : `Pendiente de ${formatCurrency(record.clientTotal)}`}</small></td>}
                 {show("nextPayment") && <td><strong className={clientBalance(record) > 0 && daysFromToday(record.nextPaymentDate) < 0 ? "text-danger" : ""}>{formatCurrency(clientBalance(record) <= 0 ? 0 : Math.min(record.nextPaymentAmount || clientBalance(record), clientBalance(record)))}</strong><small className="cell-note">{clientBalance(record) <= 0 ? "Pagado · saldo $0" : formatDate(record.nextPaymentDate)}</small></td>}
                 {show("indexation") && <td><span className="soft-tag">{record.indexation || "Sin definir"}</span></td>}
                 {show("status") && <td><span className={`status-pill ${statusClass(record.status)}`}>{record.status || "Pendiente"}</span></td>}
@@ -1038,7 +1093,7 @@ function ClientsView({ records, onEdit, onNewContract }: {
     });
     return [...grouped.values()].map((items) => {
       const sorted = [...items].sort((a, b) => Date.parse(b.updatedAt || "") - Date.parse(a.updatedAt || ""));
-      const profile = sorted.find((item) => item.clientEmail || item.clientPhone || item.clientId || item.clientInstitution || item.seller || item.salesChannel) || sorted[0];
+      const profile = sorted.find((item) => item.clientEmail || item.clientPhone || item.clientId || item.clientInstitution || item.clientCountry || item.seller || item.salesChannel) || sorted[0];
       return {
         profile,
         records: sorted,
@@ -1055,7 +1110,10 @@ function ClientsView({ records, onEdit, onNewContract }: {
     client.profile.clientEmail,
     client.profile.clientPhone,
     client.profile.clientInstitution,
+    client.profile.clientCountry,
     client.profile.clientType,
+    client.profile.contactMedium,
+    client.profile.referredBy,
     client.profile.seller,
     client.profile.salesChannel,
     ...client.records.map((record) => record.contractNumber),
@@ -1067,8 +1125,8 @@ function ClientsView({ records, onEdit, onNewContract }: {
       <div className="table-search client-search"><Search size={17} /><input value={search} onChange={(event) => setSearch(event.target.value)} placeholder="Buscar cliente, documento o contrato…" />{search && <button onClick={() => setSearch("")}><X size={15} /></button>}</div>
     </section>
     {visible.length ? <div className="client-catalog-grid">{visible.map((client) => <article className="client-profile-card" key={normalizeText(client.profile.client).toUpperCase()}>
-      <header><div className="client-avatar">{client.profile.client.split(" ").slice(0, 2).map((part) => part[0]).join("")}</div><div><h3>{client.profile.client}</h3><p>{client.profile.clientInstitution || "Cliente particular"}</p><span>{client.profile.clientId || "Sin identificación"} · {client.profile.clientType || "Existente"}</span></div><button className="button primary small" onClick={() => onNewContract(client.profile)}><Plus size={15} /> Nuevo contrato</button></header>
-      <div className="client-contact-grid"><span><b>Correo</b>{client.profile.clientEmail || "—"}</span><span><b>Teléfono</b>{client.profile.clientPhone || "—"}</span><span><b>Vendedor / canal</b>{[client.profile.seller, client.profile.salesChannel].filter(Boolean).join(" · ") || "—"}</span></div>
+      <header><div className="client-avatar">{client.profile.client.split(" ").slice(0, 2).map((part) => part[0]).join("")}</div><div><h3>{client.profile.client}</h3><p>{client.profile.clientInstitution || "Cliente particular"}</p><span>{client.profile.clientId || "Sin identificación"} · {client.profile.clientType || "Existente"} · {client.profile.clientCountry || "País no registrado"}</span></div><button className="button primary small" onClick={() => onNewContract(client.profile)}><Plus size={15} /> Nuevo contrato</button></header>
+      <div className="client-contact-grid"><span><b>Correo</b>{client.profile.clientEmail || "—"}</span><span><b>Teléfono</b>{client.profile.clientPhone || "—"}</span><span><b>País</b>{client.profile.clientCountry || "—"}</span><span><b>Origen</b>{client.profile.clientType === "Recomendado" || client.profile.contactMedium === "Recomendación" ? `Recomendación${client.profile.referredBy ? ` · ${client.profile.referredBy}` : ""}` : client.profile.contactMedium || "—"}</span><span><b>Vendedor / canal</b>{[client.profile.seller, client.profile.salesChannel].filter(Boolean).join(" · ") || "—"}</span></div>
       <div className="client-financial-summary"><div><span>Contratos</span><strong>{client.records.length}</strong></div><div><span>Activos</span><strong>{client.active}</strong></div><div><span>Valor total</span><strong>{formatCurrency(client.total)}</strong></div><div><span>Cartera</span><strong>{formatCurrency(client.balance)}</strong></div></div>
       <div className="client-contract-list"><strong>Contratos y procesos</strong>{client.records.map((record) => <button key={record.id} onClick={() => onEdit(record)}><span><b>{record.contractNumber || "Sin número"}</b><small>{record.topic || record.product || "Sin tema"}</small></span><span><b>{statusBucket(record.status)}</b><small>{formatDate(record.contractStartDate)} — {formatDate(record.contractEndDate)}</small></span><ProgressBar value={record.progress} compact /></button>)}</div>
     </article>)}</div> : <EmptyState title="No hay clientes coincidentes" text="Registre un proceso o cambie el texto de búsqueda." />}
@@ -1178,6 +1236,95 @@ function InvestigatorsView({ records, investigators, onSaveCatalog, onEdit, noti
   </div>;
 }
 
+function SellersView({ records, sellers, onSaveCatalog, onEdit, notify }: {
+  records: EditorialRecord[];
+  sellers: Seller[];
+  onSaveCatalog: (items: Seller[]) => Promise<void>;
+  onEdit: (record: EditorialRecord) => void;
+  notify: (message: string, tone?: "success" | "danger") => void;
+}) {
+  const [draft, setDraft] = useState<Seller | null>(null);
+  const [busy, setBusy] = useState(false);
+  const team = useMemo(() => {
+    const names = new Set([...sellers.map((item) => item.name), ...records.map((record) => record.seller).filter(Boolean)]);
+    return [...names].map((name) => {
+      const profile = sellers.find((item) => item.name === name);
+      const ownRecords = records.filter((record) => record.seller === name);
+      return {
+        profile,
+        name,
+        records: ownRecords,
+        clients: new Set(ownRecords.map((record) => normalizeText(record.client).toUpperCase())).size,
+        contracted: ownRecords.reduce((sum, record) => sum + record.clientTotal, 0),
+        paid: ownRecords.reduce((sum, record) => sum + paidByClient(record), 0),
+        balance: ownRecords.reduce((sum, record) => sum + clientBalance(record), 0),
+      };
+    }).sort((a, b) => b.records.length - a.records.length || a.name.localeCompare(b.name, "es"));
+  }, [records, sellers]);
+
+  const saveProfile = async (event: FormEvent) => {
+    event.preventDefault();
+    if (!draft?.name.trim()) return;
+    const duplicate = sellers.some((item) => item.id !== draft.id && normalizeText(item.name).toUpperCase() === normalizeText(draft.name).toUpperCase());
+    if (duplicate) {
+      notify("Ya existe un vendedor con ese nombre.", "danger");
+      return;
+    }
+    const now = new Date().toISOString();
+    const next = sellers.some((item) => item.id === draft.id)
+      ? sellers.map((item) => item.id === draft.id ? { ...draft, name: draft.name.trim(), updatedAt: now } : item)
+      : [...sellers, { ...draft, name: draft.name.trim(), createdAt: now, updatedAt: now }];
+    setBusy(true);
+    try {
+      await onSaveCatalog(next);
+      setDraft(null);
+      notify("Catálogo de vendedores actualizado.");
+    } catch (error) {
+      notify(error instanceof Error ? error.message : "No se pudo guardar el vendedor.", "danger");
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const toggleActive = async (profile: Seller) => {
+    const next = sellers.map((item) => item.id === profile.id ? { ...item, active: !item.active, updatedAt: new Date().toISOString() } : item);
+    try {
+      await onSaveCatalog(next);
+      notify(profile.active ? "Vendedor marcado como inactivo." : "Vendedor reactivado.");
+    } catch (error) {
+      notify(error instanceof Error ? error.message : "No se pudo actualizar el vendedor.", "danger");
+    }
+  };
+
+  return <div className="view-stack">
+    <section className="panel investigator-catalog">
+      <div className="panel-heading"><div><span className="eyebrow">CATÁLOGO COMERCIAL</span><h3>Administrar vendedores</h3></div><button className="button primary" onClick={() => setDraft(blankSeller())}><Plus size={16} /> Nuevo vendedor</button></div>
+      <p className="panel-description">Los vendedores activos aparecen en el desplegable del formulario. La información se almacena en la pestaña Vendedores de Google Sheets.</p>
+      {draft && <form className="investigator-form" onSubmit={saveProfile}>
+        <div className="form-grid three-cols">
+          <label>Nombre completo *<input value={draft.name} onChange={(event) => setDraft({ ...draft, name: event.target.value })} required autoFocus /></label>
+          <label>Cédula / identificación<input inputMode="numeric" value={draft.documentId} onChange={(event) => setDraft({ ...draft, documentId: event.target.value })} /></label>
+          <label>Estado<select value={draft.active ? "activo" : "inactivo"} onChange={(event) => setDraft({ ...draft, active: event.target.value === "activo" })}><option value="activo">Activo</option><option value="inactivo">Inactivo</option></select></label>
+          <label>Correo<input type="email" value={draft.email} onChange={(event) => setDraft({ ...draft, email: event.target.value })} /></label>
+          <label>Teléfono<input value={draft.phone} onChange={(event) => setDraft({ ...draft, phone: event.target.value })} /></label>
+          <label>Fecha de ingreso<input type="date" value={draft.startDate} onChange={(event) => setDraft({ ...draft, startDate: event.target.value })} /></label>
+          <label>Fecha de salida<input type="date" min={draft.startDate} value={draft.endDate} onChange={(event) => setDraft({ ...draft, endDate: event.target.value })} /></label>
+          <label className="span-2">Notas<textarea rows={3} value={draft.notes} onChange={(event) => setDraft({ ...draft, notes: event.target.value })} /></label>
+        </div>
+        <div className="inline-actions"><button type="button" className="button secondary" onClick={() => setDraft(null)}>Cancelar</button><button className="button primary" disabled={busy}>{busy ? <RefreshCw className="spin" size={16} /> : <Save size={16} />} Guardar vendedor</button></div>
+      </form>}
+    </section>
+    <section className="panel">
+      <div className="panel-heading"><div><span className="eyebrow">VENTAS AGRUPADAS POR RESPONSABLE</span><h3>Contratos, clientes, recaudación y cartera</h3></div><span className="count-chip">{team.length} vendedores</span></div>
+      {team.length ? <div className="team-grid grouped-team-grid">{team.map((person) => <article className={`team-card grouped-team-card ${person.profile && !person.profile.active ? "inactive" : ""}`} key={person.name}>
+        <div className="team-card-head"><div className="avatar seller-avatar">{person.name.split(" ").slice(0, 2).map((word) => word[0]).join("")}</div><div className="team-main"><h4>{person.name}</h4><p>{person.clients} clientes · {person.records.length} contratos</p></div>{person.profile && <div className="team-actions"><button className="icon-button" onClick={() => setDraft(structuredClone(person.profile!))} aria-label={`Editar ${person.name}`}><Pencil size={15} /></button><button className="button secondary small" onClick={() => toggleActive(person.profile!)}>{person.profile.active ? "Desactivar" : "Activar"}</button></div>}</div>
+        <div className="team-stats"><div><span>Valor contratado</span><strong>{formatCurrency(person.contracted)}</strong></div><div><span>Recaudado</span><strong>{formatCurrency(person.paid)}</strong></div><div><span>Cartera</span><strong>{formatCurrency(person.balance)}</strong></div></div>
+        <div className="investigator-processes"><strong>Contratos gestionados</strong>{person.records.length ? person.records.map((record) => <button key={record.id} onClick={() => onEdit(record)}><span><b>{record.client}</b><small>{record.contractNumber || record.topic || record.product}</small></span><span><b>{clientPaymentState(record) === "pagado" ? "Pagado completo" : clientPaymentState(record) === "parcial" ? "Pago parcial" : "Pendiente"}</b><small>{record.salesChannel || "Sin canal"}</small></span><span className="assignment-payment-summary"><b>{formatCurrency(paidByClient(record))}</b><small>de {formatCurrency(record.clientTotal)}</small></span></button>) : <p>Sin contratos asignados.</p>}</div>
+      </article>)}</div> : <EmptyState title="Sin vendedores" text="Registre al equipo comercial para habilitar el desplegable del formulario." />}
+    </section>
+  </div>;
+}
+
 function ContractsView({ records, onEdit }: { records: EditorialRecord[]; onEdit: (record: EditorialRecord) => void }) {
   const contracts = records.filter((record) => record.contractNumber);
   return <section className="panel"><div className="panel-heading"><div><span className="eyebrow">CONTRATOS</span><h3>Registro contractual consolidado</h3></div><span className="count-chip">{contracts.length} con número</span></div>{contracts.length ? <div className="contract-grid">{contracts.map((record) => <div key={record.id} className="contract-card"><button className="contract-main-button" onClick={() => onEdit(record)}><div className="contract-icon"><FileText /></div><div><span className="mono">{record.contractNumber}</span><h4>{record.client}</h4><p>{record.topic || record.product || "Sin detalle del producto"}</p><small>{formatDate(record.contractStartDate)} — {formatDate(record.contractEndDate)}</small></div><div className="contract-side"><span className={`priority-pill ${normalizeText(record.operationalStatus).toLowerCase().replace(/\s+/g, "-")}`}>{record.operationalStatus}</span><strong>{formatCurrency(record.clientTotal)}</strong><ProgressBar value={record.progress} compact /></div></button>{record.contractLink && <a className="contract-link" href={record.contractLink} target="_blank" rel="noreferrer"><Link2 size={15} /> Ver contrato</a>}</div>)}</div> : <EmptyState title="No hay contratos registrados" text="Los procesos sin número permanecen disponibles en Procesos editoriales." />}</section>;
@@ -1262,7 +1409,7 @@ function GoogleSheetsView({
     setTestResult("");
     try {
       const result = await testGoogleSheetsConnection(draft);
-      setTestResult(`${result.clients} clientes · ${result.records} procesos · ${result.assignments} asignaciones · revisión ${result.revision}`);
+      setTestResult(`${result.clients} clientes · ${result.records} procesos · ${result.investigators} investigadores · ${result.sellers} vendedores · revisión ${result.revision}`);
       notify("Conexión con Google Sheets verificada.");
     } catch (error) {
       notify(error instanceof Error ? error.message : "No se pudo conectar con Google Sheets.", "danger");
@@ -1312,7 +1459,7 @@ function GoogleSheetsView({
           </div>
           <div className="sync-explainer">
             <h4>¿Qué se almacena?</h4>
-            <p>Clientes, contratos, procesos, cartera, pagos, catálogo de investigadores e historial completo de asignaciones. Google Sheets separa Clientes, Investigadores e HistorialInvestigadores para facilitar el control.</p>
+            <p>Clientes, contratos, procesos, cartera, pagos y catálogos de investigadores y vendedores. Google Sheets separa Clientes, Investigadores, Vendedores e HistorialInvestigadores para facilitar el control.</p>
             <h4>Conciliación segura</h4>
             <p>Antes de subir, el sistema descarga la revisión vigente, combina cambios por ID y fecha de actualización, conserva eliminaciones y evita sobrescribir una edición simultánea.</p>
           </div>
@@ -1355,7 +1502,7 @@ function DataView({
       {busy && <div className="busy-banner"><RefreshCw className="spin" />{busy}</div>}
       <section className="data-actions cloud-data-actions">
         <article><div className="data-icon green"><Upload /></div><h3>Importar Excel a Google Sheets</h3><p>Los archivos se procesan en memoria y sus registros se guardan inmediatamente en la base central.</p><input ref={excelRef} type="file" accept=".xlsx,.xls" multiple hidden onChange={(event) => importFiles(event.target.files)} /><button className="button primary" onClick={() => excelRef.current?.click()}><FileSpreadsheet size={16} /> Seleccionar archivos</button></article>
-        <article><div className="data-icon blue"><Download /></div><h3>Exportar reporte</h3><p>Genera un Excel con procesos, pagos e investigadores desde los datos vigentes de Google Sheets.</p><button className="button secondary" onClick={async () => { setBusy("Generando Excel…"); try { await exportWorkbook(data.records, data.investigators); notify("Reporte Excel generado."); } finally { setBusy(""); } }}><Download size={16} /> Descargar Excel</button></article>
+        <article><div className="data-icon blue"><Download /></div><h3>Exportar reporte</h3><p>Genera un Excel con procesos, pagos, investigadores y vendedores desde los datos vigentes de Google Sheets.</p><button className="button secondary" onClick={async () => { setBusy("Generando Excel…"); try { await exportWorkbook(data.records, data.investigators, data.sellers); notify("Reporte Excel generado."); } finally { setBusy(""); } }}><Download size={16} /> Descargar Excel</button></article>
       </section>
       <section className="data-grid">
         <article className="panel"><div className="panel-heading"><div><span className="eyebrow">ALMACENAMIENTO</span><h3>Modo exclusivamente remoto</h3></div><Cloud /></div><div className="remote-storage-card"><strong>{data.records.length} procesos en Google Sheets</strong><p>No se usa almacenamiento persistente del navegador ni una base incluida en GitHub. Cada creación, edición, eliminación o importación debe confirmarse en la hoja antes de actualizar la pantalla.</p><span><ShieldCheck size={15} /> La clave desaparece al cerrar o recargar la pestaña.</span></div></article>
@@ -1373,7 +1520,10 @@ const newContractForClient = (source: EditorialRecord): EditorialRecord => ({
   clientPhone: source.clientPhone,
   clientAddress: source.clientAddress,
   clientInstitution: source.clientInstitution,
-  clientType: "Existente",
+  clientCountry: source.clientCountry,
+  clientType: source.clientType,
+  contactMedium: source.contactMedium,
+  referredBy: source.referredBy,
   sources: ["Nuevo contrato de cliente existente"],
 });
 
@@ -1468,7 +1618,7 @@ export default function EditorialApp() {
     if (!data) return [];
     const query = normalizeText(filters.search).toUpperCase();
     return data.records.filter((record) => {
-      const haystack = normalizeText([record.client, record.topic, record.product, record.contractNumber, record.journal, record.investigator, ...record.investigatorHistory.map((item) => item.investigator), record.status, record.operationalStatus, record.indexation, record.clientEmail, record.clientInstitution, record.clientType, record.seller, record.salesChannel].join(" ")).toUpperCase();
+      const haystack = normalizeText([record.client, record.topic, record.product, record.contractNumber, record.journal, record.investigator, ...record.investigatorHistory.map((item) => item.investigator), record.status, record.operationalStatus, record.indexation, record.clientEmail, record.clientInstitution, record.clientCountry, record.clientType, record.contactMedium, record.referredBy, record.seller, record.salesChannel].join(" ")).toUpperCase();
       if (query && !haystack.includes(query)) return false;
       if (filters.status && statusBucket(record.status) !== filters.status) return false;
       if (filters.investigator && !record.investigatorHistory.some((item) => item.investigator === filters.investigator)) return false;
@@ -1512,10 +1662,13 @@ export default function EditorialApp() {
     }
   };
   const saveGoogleConfig = async (config: GoogleSheetsConfig) => {
-    await persist(addAudit({ ...data, googleSheets: config, version: 6 }, "Google Sheets", "Configuración de sincronización actualizada"));
+    await persist(addAudit({ ...data, googleSheets: config, version: 7 }, "Google Sheets", "Configuración de sincronización actualizada"));
   };
   const saveInvestigators = async (investigators: Investigator[]) => {
-    await persist(addAudit({ ...data, investigators, version: 6 }, "Investigadores", `Catálogo actualizado: ${investigators.length} registros`));
+    await persist(addAudit({ ...data, investigators, version: 7 }, "Investigadores", `Catálogo actualizado: ${investigators.length} registros`));
+  };
+  const saveSellers = async (sellers: Seller[]) => {
+    await persist(addAudit({ ...data, sellers, version: 7 }, "Vendedores", `Catálogo actualizado: ${sellers.length} registros`));
   };
   const title = NAV_ITEMS.find((item) => item.key === view)?.label || "Control editorial";
 
@@ -1523,7 +1676,7 @@ export default function EditorialApp() {
     <div className="app-shell">
       <aside className={`sidebar ${mobileMenu ? "open" : ""}`}>
         <div className="sidebar-brand"><div className="brand-mark"><BookOpen size={21} /></div><div><strong>Sustainability</strong><span>Control editorial</span></div><button className="sidebar-close" onClick={() => setMobileMenu(false)}><X /></button></div>
-        <nav>{NAV_ITEMS.map((item) => { const Icon = item.icon; return <button key={item.key} className={view === item.key ? "active" : ""} onClick={() => { setView(item.key); setMobileMenu(false); }}><Icon size={18} /><span>{item.label}</span>{item.key === "alerts" && data.records.filter((record) => daysFromToday(record.nextPaymentDate || record.endDate) < 0 && record.progress < 100).length > 0 && <i className="nav-count">{data.records.filter((record) => daysFromToday(record.nextPaymentDate || record.endDate) < 0 && record.progress < 100).length}</i>}</button>; })}</nav>
+        <nav>{NAV_ITEMS.map((item) => { const Icon = item.icon; const alertCount = data.records.filter((record) => (clientBalance(record) > 0 && daysFromToday(record.nextPaymentDate) < 0) || (record.progress < 100 && daysFromToday(record.contractEndDate || record.endDate) < 0)).length; return <button key={item.key} className={view === item.key ? "active" : ""} onClick={() => { setView(item.key); setMobileMenu(false); }}><Icon size={18} /><span>{item.label}</span>{item.key === "alerts" && alertCount > 0 && <i className="nav-count">{alertCount}</i>}</button>; })}</nav>
         <div className="sidebar-bottom"><div className="secure-status"><Cloud /><div><strong>Base en Google Sheets</strong><span>{savedAt ? `Sincronizado ${new Date(savedAt).toLocaleTimeString("es-EC", { hour: "2-digit", minute: "2-digit" })}` : "Conexión activa"}</span></div></div><button onClick={() => { dataRef.current = null; setData(null); setSyncState({ state: "idle", message: "" }); }}><LockKeyhole size={17} /> Cerrar sesión</button></div>
       </aside>
       {mobileMenu && <button className="mobile-overlay" onClick={() => setMobileMenu(false)} aria-label="Cerrar menú" />}
@@ -1539,13 +1692,14 @@ export default function EditorialApp() {
           {view === "processes" && <><FiltersBar filters={filters} setFilters={setFilters} records={data.records} /><ProcessesTable records={filtered} onEdit={setEditing} /></>}
           {view === "portfolio" && <PortfolioView records={data.records} onEdit={setEditing} />}
           {view === "investigators" && <InvestigatorsView records={data.records} investigators={data.investigators} onSaveCatalog={saveInvestigators} onEdit={setEditing} notify={notify} />}
+          {view === "sellers" && <SellersView records={data.records} sellers={data.sellers} onSaveCatalog={saveSellers} onEdit={setEditing} notify={notify} />}
           {view === "contracts" && <ContractsView records={data.records} onEdit={setEditing} />}
           {view === "alerts" && <AlertsView records={data.records} onEdit={setEditing} />}
           {view === "google" && <GoogleSheetsView data={data} onSave={saveGoogleConfig} onSync={() => runGoogleSync(true)} syncState={syncState} notify={notify} />}
           {view === "data" && <DataView data={data} onData={persist} notify={notify} />}
         </div>
       </main>
-      {(editing || newRecord) && <RecordModal source={editing || newRecord || blankRecord()} investigators={data.investigators} credentialsEnabled={Boolean(data.googleSheets?.includeCredentials)} onClose={() => { setEditing(null); setNewRecord(null); }} onSave={saveRecord} onDelete={editing ? deleteRecord : undefined} />}
+      {(editing || newRecord) && <RecordModal source={editing || newRecord || blankRecord()} investigators={data.investigators} sellers={data.sellers} credentialsEnabled={Boolean(data.googleSheets?.includeCredentials)} onClose={() => { setEditing(null); setNewRecord(null); }} onSave={saveRecord} onDelete={editing ? deleteRecord : undefined} />}
       {toast && <div className={`toast ${toast.tone}`}><span>{toast.tone === "success" ? <Check /> : <AlertCircle />}</span>{toast.message}</div>}
     </div>
   );

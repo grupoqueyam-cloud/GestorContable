@@ -6,6 +6,7 @@ import type {
   InvestigatorAssignment,
   InvestigatorInstallment,
   JournalAccess,
+  Seller,
 } from "./types";
 
 export const normalizeText = (value: unknown) =>
@@ -136,6 +137,23 @@ export const blankInvestigator = (): Investigator => {
   };
 };
 
+export const blankSeller = (): Seller => {
+  const now = new Date().toISOString();
+  return {
+    id: uid(),
+    name: "",
+    documentId: "",
+    email: "",
+    phone: "",
+    startDate: "",
+    endDate: "",
+    notes: "",
+    active: true,
+    createdAt: now,
+    updatedAt: now,
+  };
+};
+
 export const blankInvestigatorInstallment = (number: 1 | 2, amount = 0): InvestigatorInstallment => ({
   number,
   amount,
@@ -211,7 +229,10 @@ export const blankRecord = (): EditorialRecord => {
     clientPhone: "",
     clientAddress: "",
     clientInstitution: "",
+    clientCountry: "",
     clientType: "Nuevo",
+    contactMedium: "",
+    referredBy: "",
     seller: "",
     salesChannel: "",
     saleDate: "",
@@ -227,9 +248,8 @@ export const blankRecord = (): EditorialRecord => {
 export const paidClientPaymentAmount = (payment: ClientPayment) => {
   const amount = Math.max(0, Number(payment.amount) || 0);
   const paidAmount = Math.max(0, Number(payment.paidAmount) || 0);
-  if (payment.status === "pagado") return Math.max(paidAmount, amount);
-  if (payment.status === "parcial") return amount > 0 ? Math.min(paidAmount, amount) : paidAmount;
-  return 0;
+  const received = payment.status === "pagado" ? Math.max(paidAmount, amount) : paidAmount;
+  return amount > 0 ? Math.min(received, amount) : received;
 };
 
 export const paidByClient = (record: EditorialRecord) =>
@@ -242,6 +262,15 @@ export const clientBalance = (record: EditorialRecord) => {
   if (total > 0) return Math.max(0, total - paid);
   if (record.clientPayments.length > 0) return Math.max(0, confirmed - paid);
   return confirmed;
+};
+
+export const clientPaymentState = (record: EditorialRecord) => {
+  const total = Math.max(0, Number(record.clientTotal) || 0);
+  const paid = paidByClient(record);
+  const balance = clientBalance(record);
+  if (total > 0 && balance <= 0) return "pagado" as const;
+  if (paid > 0) return "parcial" as const;
+  return "pendiente" as const;
 };
 
 export const daysFromToday = (date: string) => {

@@ -1,4 +1,4 @@
-import type { AppData, ClientPayment, EditorialRecord, Investigator } from "./types";
+import type { AppData, ClientPayment, EditorialRecord, Investigator, Seller } from "./types";
 import {
   blankRecord,
   canonicalKey,
@@ -102,7 +102,10 @@ export const mergeRecordSets = (
       "clientPhone",
       "clientAddress",
       "clientInstitution",
+      "clientCountry",
       "clientType",
+      "contactMedium",
+      "referredBy",
       "seller",
       "salesChannel",
       "saleDate",
@@ -399,15 +402,20 @@ export const importExcelFiles = async (
 };
 
 export const makeEmptyData = (): AppData => ({
-  version: 6,
+  version: 7,
   records: [],
   investigators: [],
+  sellers: [],
   auditLog: [],
   deletedRecords: [],
   importedAt: new Date().toISOString(),
 });
 
-export const exportWorkbook = async (records: EditorialRecord[], investigators: Investigator[] = []) => {
+export const exportWorkbook = async (
+  records: EditorialRecord[],
+  investigators: Investigator[] = [],
+  sellers: Seller[] = [],
+) => {
   const ExcelJS = await import("exceljs");
   const workbook = new ExcelJS.Workbook();
   workbook.creator = "Control Editorial Sustainability";
@@ -455,7 +463,10 @@ export const exportWorkbook = async (records: EditorialRecord[], investigators: 
     "Teléfono cliente",
     "Dirección cliente",
     "Institución cliente",
+    "País cliente",
     "Tipo de cliente",
+    "Medio de contacto",
+    "Recomendado por",
     "Vendedor",
     "Canal de venta",
     "Fecha de venta",
@@ -509,7 +520,10 @@ export const exportWorkbook = async (records: EditorialRecord[], investigators: 
       record.clientPhone,
       record.clientAddress,
       record.clientInstitution,
+      record.clientCountry,
       record.clientType,
+      record.contactMedium,
+      record.referredBy,
       record.seller,
       record.salesChannel,
       record.saleDate,
@@ -551,7 +565,7 @@ export const exportWorkbook = async (records: EditorialRecord[], investigators: 
   payments.columns = [26, 22, 22, 18, 18, 16, 16, 16, 40].map((width) => ({ width }));
 
   const clients = workbook.addWorksheet("Clientes");
-  clients.addRow(["Cliente", "Tipo", "Documento", "Correo", "Teléfono", "Dirección", "Institución", "Vendedor", "Canal", "Contratos", "Contratos activos", "Valor total", "Pagado", "Cartera", "Números de contrato"]);
+  clients.addRow(["Cliente", "Tipo", "País", "Medio de contacto", "Recomendado por", "Documento", "Correo", "Teléfono", "Dirección", "Institución", "Vendedor", "Canal", "Contratos", "Contratos activos", "Valor total", "Pagado", "Cartera", "Números de contrato"]);
   const clientGroups = new Map<string, EditorialRecord[]>();
   records.forEach((record) => {
     const key = normalizeText(record.client).toUpperCase() || record.id;
@@ -562,6 +576,9 @@ export const exportWorkbook = async (records: EditorialRecord[], investigators: 
     clients.addRow([
       profile.client,
       profile.clientType,
+      profile.clientCountry,
+      profile.contactMedium,
+      profile.referredBy,
       profile.clientId,
       profile.clientEmail,
       profile.clientPhone,
@@ -580,8 +597,8 @@ export const exportWorkbook = async (records: EditorialRecord[], investigators: 
   clients.getRow(1).font = { bold: true, color: { argb: "FFFFFFFF" } };
   clients.getRow(1).fill = { type: "pattern", pattern: "solid", fgColor: { argb: "FF173F3A" } };
   clients.views = [{ state: "frozen", ySplit: 1 }];
-  clients.autoFilter = `A1:O${Math.max(1, clientGroups.size + 1)}`;
-  clients.columns = [28, 16, 20, 28, 18, 32, 26, 24, 18, 14, 16, 16, 16, 16, 38].map((width) => ({ width }));
+  clients.autoFilter = `A1:R${Math.max(1, clientGroups.size + 1)}`;
+  clients.columns = [28, 16, 18, 20, 24, 20, 28, 18, 32, 26, 24, 18, 14, 16, 16, 16, 16, 38].map((width) => ({ width }));
 
   const assignmentHistory = workbook.addWorksheet("Historial investigadores");
   assignmentHistory.addRow([
@@ -644,6 +661,35 @@ export const exportWorkbook = async (records: EditorialRecord[], investigators: 
   team.views = [{ state: "frozen", ySplit: 1 }];
   team.autoFilter = `A1:O${Math.max(1, investigators.length + 1)}`;
   team.columns = [26, 20, 28, 18, 24, 18, 18, 36, 14, 18, 16, 16, 16, 16, 42].map((width) => ({ width }));
+
+  const salesTeam = workbook.addWorksheet("Vendedores");
+  salesTeam.addRow([
+    "Nombre", "Documento", "Correo", "Teléfono", "Fecha de ingreso", "Fecha de salida",
+    "Estado", "Contratos", "Clientes", "Valor contratado", "Recaudado", "Cartera", "Notas",
+  ]);
+  sellers.forEach((seller) => {
+    const ownRecords = records.filter((record) => record.seller === seller.name);
+    salesTeam.addRow([
+      seller.name,
+      seller.documentId,
+      seller.email,
+      seller.phone,
+      seller.startDate,
+      seller.endDate,
+      seller.active ? "Activo" : "Inactivo",
+      ownRecords.length,
+      new Set(ownRecords.map((record) => normalizeText(record.client).toUpperCase())).size,
+      ownRecords.reduce((sum, record) => sum + record.clientTotal, 0),
+      ownRecords.reduce((sum, record) => sum + paidByClient(record), 0),
+      ownRecords.reduce((sum, record) => sum + clientBalance(record), 0),
+      seller.notes,
+    ]);
+  });
+  salesTeam.getRow(1).font = { bold: true, color: { argb: "FFFFFFFF" } };
+  salesTeam.getRow(1).fill = { type: "pattern", pattern: "solid", fgColor: { argb: "FFE3AA3D" } };
+  salesTeam.views = [{ state: "frozen", ySplit: 1 }];
+  salesTeam.autoFilter = `A1:M${Math.max(1, sellers.length + 1)}`;
+  salesTeam.columns = [26, 20, 28, 18, 18, 18, 14, 14, 14, 18, 18, 18, 42].map((width) => ({ width }));
 
   const buffer = await workbook.xlsx.writeBuffer();
   const blob = new Blob([buffer as BlobPart], {

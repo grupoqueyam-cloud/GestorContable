@@ -33,6 +33,20 @@ export interface Investigator {
   updatedAt: string;
 }
 
+export interface Seller {
+  id: string;
+  name: string;
+  documentId: string;
+  email: string;
+  phone: string;
+  startDate: string;
+  endDate: string;
+  notes: string;
+  active: boolean;
+  createdAt: string;
+  updatedAt: string;
+}
+
 export type InvestigatorInstallmentStatus = "pendiente" | "parcial" | "pagado";
 export type InvestigatorPaymentMode = "unico" | "dos_abonos";
 
@@ -117,7 +131,10 @@ export interface EditorialRecord {
   clientPhone: string;
   clientAddress: string;
   clientInstitution: string;
+  clientCountry: string;
   clientType: string;
+  contactMedium: string;
+  referredBy: string;
   seller: string;
   salesChannel: string;
   saleDate: string;
@@ -151,9 +168,10 @@ export interface GoogleSheetsConfig {
 }
 
 export interface AppData {
-  version: 2 | 3 | 4 | 5 | 6;
+  version: 2 | 3 | 4 | 5 | 6 | 7;
   records: EditorialRecord[];
   investigators: Investigator[];
+  sellers: Seller[];
   auditLog: AuditEntry[];
   importedAt: string;
   deletedRecords?: DeletedRecord[];
@@ -166,6 +184,7 @@ export type ViewKey =
   | "processes"
   | "portfolio"
   | "investigators"
+  | "sellers"
   | "contracts"
   | "alerts"
   | "google"
