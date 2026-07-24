@@ -102,6 +102,12 @@ export const blankPayment = (concept = "Próximo pago"): ClientPayment => ({
   note: "",
 });
 
+export const blankReceivedPayment = (): ClientPayment => ({
+  ...blankPayment("Abono recibido"),
+  paidDate: new Date().toISOString().slice(0, 10),
+  status: "pagado",
+});
+
 export const blankJournalAccess = (): JournalAccess => ({
   id: uid(),
   journal: "",
@@ -250,6 +256,52 @@ export const paidClientPaymentAmount = (payment: ClientPayment) => {
   const paidAmount = Math.max(0, Number(payment.paidAmount) || 0);
   const received = payment.status === "pagado" ? Math.max(paidAmount, amount) : paidAmount;
   return amount > 0 ? Math.min(received, amount) : received;
+};
+
+export const normalizeClientPayment = (
+  payment: ClientPayment,
+  fallbackId = "",
+): ClientPayment => {
+  const amount = Math.max(0, Number(payment.amount) || 0);
+  const rawPaid = Math.max(0, Number(payment.paidAmount) || 0);
+  const received = payment.status === "pagado" ? Math.max(rawPaid, amount) : rawPaid;
+  const paidAmount = amount > 0 ? Math.min(received, amount) : received;
+  const status: ClientPayment["status"] = paidAmount > 0
+    ? amount <= 0 || paidAmount >= amount ? "pagado" : "parcial"
+    : payment.status === "vencido" ? "vencido" : "pendiente";
+  return {
+    ...payment,
+    id: payment.id || fallbackId || uid(),
+    concept: payment.concept || "Pago",
+    scheduledDate: payment.scheduledDate || "",
+    paidDate: paidAmount > 0 ? payment.paidDate || "" : "",
+    amount,
+    paidAmount,
+    status,
+    note: payment.note || "",
+  };
+};
+
+export const normalizeClientPayments = (record: EditorialRecord): ClientPayment[] => {
+  const current = (Array.isArray(record.clientPayments) ? record.clientPayments : [])
+    .map((payment, index) => normalizeClientPayment(payment, `${record.id || "payment"}-${index + 1}`));
+  if (current.length > 0) return current;
+
+  const total = Math.max(0, Number(record.clientTotal) || 0);
+  const storedBalance = Math.max(0, Number(record.outstandingBalance) || 0);
+  if (total <= 0 || storedBalance <= 0 || storedBalance >= total) return current;
+
+  const inferredPaid = Math.max(0, total - storedBalance);
+  return [{
+    id: `${record.id || "legacy"}-pago-inferido-saldo`,
+    concept: "Pago histórico inferido del saldo",
+    scheduledDate: "",
+    paidDate: "",
+    amount: inferredPaid,
+    paidAmount: inferredPaid,
+    status: "pagado",
+    note: `Migrado automáticamente: total ${total} menos saldo registrado ${storedBalance}.`,
+  }];
 };
 
 export const paidByClient = (record: EditorialRecord) =>

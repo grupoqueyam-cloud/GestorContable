@@ -156,12 +156,14 @@ https://grupoqueyam-cloud.github.io/GestorContable/
 2. Abra **Extensiones → Apps Script** en la misma hoja que ya utiliza.
 3. Reemplace completamente el contenido anterior de `Code.gs` con `google-apps-script/Code.gs` de este paquete.
 4. Guarde y ejecute la función `configurarHojas`.
-5. La migración conserva procesos, pagos, clientes, contratos, credenciales, revistas e historiales existentes. El esquema 5 agrega las columnas nuevas al final y crea el catálogo de vendedores sin borrar ni reordenar las columnas anteriores.
+5. La migración conserva procesos, pagos, clientes, contratos, credenciales, revistas e historiales existentes. El esquema 6 agrega al final las columnas de recaudación y estado de pago sin borrar ni reordenar las columnas anteriores.
 6. Los investigadores actuales y anteriores existentes se incorporan automáticamente al catálogo y al historial de su proceso. Cuando el archivo anterior no contiene honorarios o fechas del responsable anterior, esos datos quedan marcados para revisión sin inventar valores de pago.
 7. El valor anterior pagado al investigador se distribuye, sin perderlo, entre los dos abonos del registro migrado. Después puede cambiar la modalidad a pago único.
 8. Los pagos antiguos marcados como `pagado` reciben automáticamente el mismo importe en `Valor pagado`. Los abonos que ya tengan un `Valor pagado` se reconocen aunque su estado antiguo diga pendiente; cartera, recaudación y saldo se recalculan.
-9. Revise manualmente las fechas históricas y la distribución de pagos cuando el contrato anterior no contenga suficiente detalle.
-10. Publique una nueva versión de la misma implementación web como se explica en la sección 9.
+9. Si un contrato no tiene filas en `PagosCliente`, pero conserva un total y un saldo menor —por ejemplo, total 1.350 y saldo 750— la migración registra automáticamente el pago histórico de 600.
+10. Contratos, órdenes, documentos, teléfonos y números de factura se formatean como texto para conservar los ceros iniciales. Los ceros que Google Sheets ya hubiera eliminado deben escribirse nuevamente después de actualizar.
+11. Revise manualmente las fechas históricas y la distribución de pagos cuando el contrato anterior no contenga suficiente detalle.
+12. Publique una nueva versión de la misma implementación web como se explica en la sección 9.
 
 No cree otra hoja ni cambie `SYNC_SECRET` o `cloud-config.json` si desea conservar la conexión existente.
 
@@ -208,7 +210,7 @@ La función creará las siguientes pestañas:
 
 | Pestaña | Función |
 |---|---|
-| `Procesos` | Clientes, contratos, datos editoriales, cartera, investigadores y credenciales. |
+| `Procesos` | Clientes, contratos, datos editoriales, total, recaudación calculada, cartera, estado de pago, investigadores y credenciales. |
 | `PagosCliente` | Cuotas, valor previsto, valor efectivamente pagado, fechas y estados. |
 | `Historial` | Registro de importaciones, ediciones y sincronizaciones. |
 | `Eliminados` | Identificadores borrados y fecha de eliminación. |
@@ -316,8 +318,8 @@ La pantalla se actualiza solo después de que Google Sheets confirma la escritur
 ### Cartera
 
 - Registre el total contratado.
-- Añada las cuotas y fechas programadas.
-- Escriba el valor efectivamente recibido en cada abono; el sistema asigna pendiente, parcial o pagado según el valor.
+- Use **Registrar abono recibido** para cada cobro o **Añadir cuota pendiente** para programar un pago futuro.
+- Escriba el valor efectivamente recibido en `Valor recibido`; el sistema asigna pendiente, parcial o pagado según el valor.
 - El saldo pendiente se calcula como total contratado menos recaudación registrada. Si el pago cubre el total, el saldo y el próximo valor quedan en cero.
 - El dashboard y las gráficas recalculan los indicadores automáticamente.
 
@@ -419,7 +421,7 @@ El valor ingresado debe coincidir exactamente con `SYNC_SECRET`. Revise espacios
 
 ### La aplicación pide actualizar el esquema
 
-El sitio nuevo requiere el esquema 5. Reemplace completamente `Code.gs`, ejecute `configurarHojas` y publique una **nueva versión** de la implementación web. Al abrir la URL `/exec` debe aparecer `"schemaVersion":5`. Después recargue GitHub Pages con `Ctrl + F5`.
+El sitio nuevo requiere el esquema 6. Reemplace completamente `Code.gs`, ejecute `configurarHojas` y publique una **nueva versión** de la implementación web. Al abrir la URL `/exec` debe aparecer `"schemaVersion":6`. Después recargue GitHub Pages con `Ctrl + F5`.
 
 ### Un archivo de Drive no muestra vista previa
 

@@ -12,7 +12,7 @@
  */
 
 const APP_NAME = "Control Editorial Sustainability";
-const SCHEMA_VERSION = 5;
+const SCHEMA_VERSION = 6;
 const PROP_SECRET = "SYNC_SECRET";
 const PROP_REVISION = "DATA_REVISION";
 const PROP_FINGERPRINT = "DATA_FINGERPRINT";
@@ -43,6 +43,7 @@ const RECORD_HEADERS = [
   "Factura investigador estado", "Revistas JSON", "Drive JSON", "Historial investigadores JSON",
   "Tipo cliente", "Vendedor", "Canal venta", "Fecha venta", "Informacion ventas",
   "Pais cliente", "Medio contacto", "Recomendado por",
+  "Recaudacion cliente", "Estado pago cliente",
 ];
 
 const PAYMENT_HEADERS = [
@@ -62,6 +63,7 @@ const CLIENT_HEADERS = [
   "Numero contratos", "Contratos activos", "Valor total", "Cartera", "Contratos JSON", "Actualizado",
   "Tipo cliente", "Vendedor", "Canal venta", "Fecha venta",
   "Pais cliente", "Medio contacto", "Recomendado por",
+  "Recaudacion", "Estado de pago",
 ];
 const SELLER_HEADERS = [
   "ID", "Nombre", "Documento", "Email", "Telefono", "Fecha ingreso", "Fecha salida",
@@ -106,7 +108,7 @@ function doPost(e) {
 
 function configurarHojas() {
   ensureSheets();
-  migrarDatosV5();
+  migrarDatosV6();
   applyDropdownValidations();
   const properties = PropertiesService.getScriptProperties();
   if (properties.getProperty(PROP_REVISION) === null) properties.setProperty(PROP_REVISION, "0");
@@ -122,7 +124,7 @@ function onOpen() {
   SpreadsheetApp.getUi()
     .createMenu("Control Editorial")
     .addItem("Configurar hojas", "configurarHojas")
-    .addItem("Migrar datos a versión 5", "migrarDatosV5")
+    .addItem("Migrar datos a versión 6", "migrarDatosV6")
     .addItem("Ver estado", "mostrarEstado")
     .addToUi();
 }
@@ -275,6 +277,10 @@ function ensureSheets() {
   prepareSheet(spreadsheet, SHEETS.sellers, SELLER_HEADERS, "#b07a1c");
   prepareSheet(spreadsheet, SHEETS.clients, CLIENT_HEADERS, "#17463f");
   prepareSheet(spreadsheet, SHEETS.investigatorHistory, INVESTIGATOR_HISTORY_HEADERS, "#536e8a");
+  Object.values(SHEETS).forEach((name) => {
+    const sheet = spreadsheet.getSheetByName(name);
+    if (sheet) applyTextColumnFormats(sheet);
+  });
 }
 
 function applyDropdownValidations() {
@@ -451,6 +457,25 @@ function migrarDatosV5() {
   writeClients(records);
   writeInvestigatorHistory(records);
   writeSellers(sellers);
+  PropertiesService.getScriptProperties().deleteProperty(PROP_FINGERPRINT);
+  setRevision(getRevision() + 1);
+  applyDropdownValidations();
+}
+
+function migrarDatosV6() {
+  migrarDatosV5();
+  const records = readRecords();
+  records.forEach((record) => {
+    record.clientPayments = normalizeClientPayments(record);
+    if (numberValue(record.clientTotal) > 0) {
+      record.outstandingBalance = clientRecordBalance(record);
+      if (record.outstandingBalance <= 0) record.nextPaymentAmount = 0;
+    }
+  });
+  writeRecords(records);
+  writePayments(records);
+  writeClients(records);
+  writeInvestigatorHistory(records);
   PropertiesService.getScriptProperties().deleteProperty(PROP_FINGERPRINT);
   setRevision(getRevision() + 1);
   applyDropdownValidations();
@@ -707,6 +732,7 @@ function writeRecords(records) {
 }
 
 function recordToRow(record) {
+  const received = clientPaidAmount(record);
   const calculatedBalance = numberValue(record.clientTotal) > 0
     ? clientRecordBalance(record)
     : numberValue(record.outstandingBalance);
@@ -731,14 +757,17 @@ function recordToRow(record) {
     cell(record.clientType || "Existente"), cell(record.seller), cell(record.salesChannel),
     cell(record.saleDate), cell(record.salesNotes),
     cell(record.clientCountry), cell(record.contactMedium), cell(record.referredBy),
+    received, cell(clientPaymentStateValue(record)),
   ];
 }
 
 function readRecords() {
   const rows = readObjects(activeSpreadsheet().getSheetByName(SHEETS.records), RECORD_HEADERS);
   const payments = readPayments();
-  return rows.filter((row) => text(row.ID)).map((row) => ({
-    id: text(row.ID),
+  return rows.filter((row) => text(row.ID)).map((row) => {
+    const id = text(row.ID);
+    const record = {
+    id,
     client: text(row.Cliente),
     topic: text(row.Tema),
     product: text(row.Producto),
@@ -758,7 +787,7 @@ function readRecords() {
     acceptanceDate: dateText(row["Fecha aceptacion"]),
     clientTotal: numberValue(row["Total cliente"]),
     outstandingBalance: numberValue(row["Saldo pendiente"]),
-    clientPayments: payments.get(text(row.ID)) || [],
+    clientPayments: payments.get(id) || [],
     nextPaymentDate: dateText(row["Proximo pago fecha"]),
     nextPaymentAmount: numberValue(row["Proximo pago valor"]),
     investigatorPayment: numberValue(row["Pago investigador"]),
@@ -797,7 +826,13 @@ function readRecords() {
     journalAccesses: parseArray(row["Revistas JSON"]),
     driveFiles: parseArray(row["Drive JSON"]),
     investigatorHistory: parseArray(row["Historial investigadores JSON"]),
-  }));
+    recordedClientPaid: numberValue(row["Recaudacion cliente"]),
+    };
+    record.clientPayments = normalizeClientPayments(record);
+    delete record.recordedClientPaid;
+    if (numberValue(record.clientTotal) > 0) record.outstandingBalance = clientRecordBalance(record);
+    return record;
+  });
 }
 
 function writePayments(records) {
@@ -821,9 +856,9 @@ function readPayments() {
     if (!recordId || !text(row["ID pago"])) return;
     const list = grouped.get(recordId) || [];
     const amount = numberValue(row.Valor);
-    const storedPaid = text(row["Valor pagado"]);
     const storedStatus = text(row.Estado).toLowerCase() || "pendiente";
-    const rawPaid = storedPaid ? numberValue(row["Valor pagado"]) : storedStatus === "pagado" ? amount : 0;
+    const rawStoredPaid = Math.max(0, numberValue(row["Valor pagado"]));
+    const rawPaid = storedStatus === "pagado" ? Math.max(rawStoredPaid, amount) : rawStoredPaid;
     const paidAmount = Math.max(0, amount > 0 ? Math.min(rawPaid, amount) : rawPaid);
     const status = paidAmount <= 0
       ? (storedStatus === "vencido" ? "vencido" : "pendiente")
@@ -841,6 +876,49 @@ function readPayments() {
     grouped.set(recordId, list);
   });
   return grouped;
+}
+
+function normalizeClientPayments(record) {
+  const current = (Array.isArray(record.clientPayments) ? record.clientPayments : []).map((payment, index) => {
+    const amount = Math.max(0, numberValue(payment.amount));
+    const rawPaid = Math.max(0, numberValue(payment.paidAmount));
+    const received = text(payment.status).toLowerCase() === "pagado" ? Math.max(rawPaid, amount) : rawPaid;
+    const paidAmount = amount > 0 ? Math.min(received, amount) : received;
+    const status = paidAmount <= 0
+      ? (text(payment.status).toLowerCase() === "vencido" ? "vencido" : "pendiente")
+      : amount <= 0 || paidAmount >= amount ? "pagado" : "parcial";
+    return {
+      id: text(payment.id) || `${text(record.id) || "payment"}-${index + 1}`,
+      concept: text(payment.concept) || "Pago",
+      scheduledDate: dateText(payment.scheduledDate),
+      paidDate: paidAmount > 0 ? dateText(payment.paidDate) : "",
+      amount,
+      paidAmount,
+      status,
+      note: text(payment.note),
+    };
+  });
+  if (current.length) return current;
+
+  const total = Math.max(0, numberValue(record.clientTotal));
+  const balance = Math.max(0, numberValue(record.outstandingBalance));
+  const summaryPaid = Math.max(0, numberValue(record.recordedClientPaid));
+  const inferredPaid = summaryPaid > 0
+    ? Math.min(summaryPaid, total || summaryPaid)
+    : total > 0 && balance > 0 && balance < total ? total - balance : 0;
+  if (inferredPaid <= 0) return current;
+  return [{
+    id: `${text(record.id) || Utilities.getUuid()}-pago-inferido-saldo`,
+    concept: "Pago histórico inferido del saldo",
+    scheduledDate: "",
+    paidDate: "",
+    amount: inferredPaid,
+    paidAmount: inferredPaid,
+    status: "pagado",
+    note: summaryPaid > 0
+      ? "Migrado desde la recaudación consolidada"
+      : `Migrado automáticamente: total ${total} menos saldo registrado ${balance}`,
+  }];
 }
 
 function writeInvestigators(items) {
@@ -926,6 +1004,10 @@ function writeClients(records) {
       cell(JSON.stringify(contracts)), cell(items.map((item) => item.updatedAt).sort().pop() || new Date().toISOString()),
       cell(profile.clientType || "Existente"), cell(profile.seller), cell(profile.salesChannel), cell(profile.saleDate),
       cell(profile.clientCountry), cell(profile.contactMedium), cell(profile.referredBy),
+      items.reduce((sum, item) => sum + clientPaidAmount(item), 0),
+      cell(items.every((item) => clientPaymentStateValue(item) === "Pagado")
+        ? "Pagado"
+        : items.some((item) => clientPaidAmount(item) > 0) ? "Parcial" : "Pendiente"),
     ];
   });
   replaceRows(activeSpreadsheet().getSheetByName(SHEETS.clients), CLIENT_HEADERS, rows);
@@ -933,18 +1015,32 @@ function writeClients(records) {
 
 function clientRecordBalance(record) {
   const payments = Array.isArray(record.clientPayments) ? record.clientPayments : [];
-  const paid = payments.reduce((sum, payment) => {
+  const paid = clientPaidAmount(record);
+  const total = Math.max(0, numberValue(record.clientTotal));
+  const confirmed = Math.max(0, numberValue(record.outstandingBalance));
+  if (total > 0) return Math.max(0, total - paid);
+  if (payments.length && confirmed > 0) return Math.max(0, confirmed - paid);
+  return confirmed;
+}
+
+function clientPaidAmount(record) {
+  const payments = Array.isArray(record.clientPayments) ? record.clientPayments : [];
+  return payments.reduce((sum, payment) => {
     const amount = Math.max(0, numberValue(payment.amount));
     const paidAmount = Math.max(0, numberValue(payment.paidAmount));
     const status = text(payment.status).toLowerCase();
     const effectivePaid = status === "pagado" ? Math.max(paidAmount, amount) : paidAmount;
     return sum + (amount > 0 ? Math.min(effectivePaid, amount) : effectivePaid);
   }, 0);
+}
+
+function clientPaymentStateValue(record) {
   const total = Math.max(0, numberValue(record.clientTotal));
-  const confirmed = Math.max(0, numberValue(record.outstandingBalance));
-  if (total > 0) return Math.max(0, total - paid);
-  if (payments.length && confirmed > 0) return Math.max(0, confirmed - paid);
-  return confirmed;
+  const paid = clientPaidAmount(record);
+  const balance = clientRecordBalance(record);
+  if (total > 0 && balance <= 0) return "Pagado";
+  if (paid > 0) return "Parcial";
+  return "Pendiente";
 }
 
 function writeInvestigatorHistory(records) {
@@ -1002,12 +1098,46 @@ function replaceRows(sheet, headers, rows) {
   if (sheet.getMaxRows() < rows.length + 1) {
     sheet.insertRowsAfter(sheet.getMaxRows(), rows.length + 1 - sheet.getMaxRows());
   }
+  applyTextColumnFormats(sheet);
   sheet.clearContents();
   sheet.getRange(1, 1, 1, headers.length).setValues([headers]);
   if (rows.length) sheet.getRange(2, 1, rows.length, headers.length).setValues(rows);
   sheet.setFrozenRows(1);
   sheet.getRange(1, 1, 1, headers.length).setBackground("#17463f").setFontColor("#ffffff").setFontWeight("bold");
   if (rows.length) sheet.getRange(1, 1, rows.length + 1, headers.length).createFilter();
+}
+
+function textHeadersForSheet(name) {
+  if (name === SHEETS.records) {
+    return ["ID", "Numero contrato", "Orden produccion", "Documento cliente", "Telefono cliente", "Factura investigador numero"];
+  }
+  if (name === SHEETS.payments) return ["ID pago", "ID proceso", "Numero contrato"];
+  if (name === SHEETS.investigators) return ["ID", "Documento", "Telefono"];
+  if (name === SHEETS.sellers) return ["ID", "Documento", "Telefono"];
+  if (name === SHEETS.clients) return ["ID cliente", "Documento", "Telefono"];
+  if (name === SHEETS.investigatorHistory) return ["ID asignacion", "ID proceso", "Numero contrato"];
+  if (name === SHEETS.deleted) return ["ID proceso"];
+  return [];
+}
+
+function headersForSheet(name) {
+  if (name === SHEETS.records) return RECORD_HEADERS;
+  if (name === SHEETS.payments) return PAYMENT_HEADERS;
+  if (name === SHEETS.investigators) return INVESTIGATOR_HEADERS;
+  if (name === SHEETS.sellers) return SELLER_HEADERS;
+  if (name === SHEETS.clients) return CLIENT_HEADERS;
+  if (name === SHEETS.investigatorHistory) return INVESTIGATOR_HISTORY_HEADERS;
+  if (name === SHEETS.deleted) return DELETED_HEADERS;
+  return [];
+}
+
+function applyTextColumnFormats(sheet) {
+  const headers = headersForSheet(sheet.getName());
+  if (!headers.length || sheet.getMaxRows() < 2) return;
+  textHeadersForSheet(sheet.getName()).forEach((header) => {
+    const column = headers.indexOf(header) + 1;
+    if (column > 0) sheet.getRange(2, column, sheet.getMaxRows() - 1, 1).setNumberFormat("@");
+  });
 }
 
 function readObjects(sheet, headers) {
@@ -1036,13 +1166,24 @@ function refreshRecordFinancials(recordId) {
   const total = Math.max(0, numberValue(recordsSheet.getRange(row, RECORD_HEADERS.indexOf("Total cliente") + 1).getValue()));
   const currentBalance = Math.max(0, numberValue(recordsSheet.getRange(row, RECORD_HEADERS.indexOf("Saldo pendiente") + 1).getValue()));
   const payments = readPayments().get(recordId) || [];
-  const paid = payments.reduce((sum, payment) => {
+  let paid = payments.reduce((sum, payment) => {
     const amount = Math.max(0, numberValue(payment.amount));
     const paidAmount = Math.max(0, numberValue(payment.paidAmount));
     return sum + (amount > 0 ? Math.min(paidAmount, amount) : paidAmount);
   }, 0);
+  const summarizedPaid = Math.max(0, numberValue(
+    recordsSheet.getRange(row, RECORD_HEADERS.indexOf("Recaudacion cliente") + 1).getValue(),
+  ));
+  if (paid <= 0 && summarizedPaid > 0) paid = Math.min(summarizedPaid, total || summarizedPaid);
+  if (paid <= 0 && total > 0 && currentBalance > 0 && currentBalance < total) {
+    paid = total - currentBalance;
+  }
   const balance = total > 0 ? Math.max(0, total - paid) : currentBalance;
   recordsSheet.getRange(row, RECORD_HEADERS.indexOf("Saldo pendiente") + 1).setValue(balance);
+  recordsSheet.getRange(row, RECORD_HEADERS.indexOf("Recaudacion cliente") + 1).setValue(paid);
+  recordsSheet.getRange(row, RECORD_HEADERS.indexOf("Estado pago cliente") + 1).setValue(
+    total > 0 && balance <= 0 ? "Pagado" : paid > 0 ? "Parcial" : "Pendiente",
+  );
   if (total > 0 && balance <= 0) {
     recordsSheet.getRange(row, RECORD_HEADERS.indexOf("Proximo pago valor") + 1).setValue(0);
   }

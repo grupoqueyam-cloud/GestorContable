@@ -67,11 +67,12 @@ import {
   importExcelFiles,
 } from "../lib/excel";
 import {
-  blankPayment,
   blankDriveFile,
   blankInvestigator,
   blankInvestigatorAssignment,
   blankJournalAccess,
+  blankPayment,
+  blankReceivedPayment,
   blankRecord,
   blankSeller,
   clientBalance,
@@ -79,6 +80,7 @@ import {
   daysFromToday,
   formatCurrency,
   formatDate,
+  normalizeClientPayment,
   normalizeText,
   paidByClient,
   paymentRisk,
@@ -268,7 +270,7 @@ function CloudAuthScreen({ onReady }: { onReady: (data: AppData) => void }) {
       };
       const snapshot = await pullGoogleSheets(config);
       onReady(normalizeAppData({
-        version: 7,
+        version: 8,
         records: snapshot.records,
         investigators: snapshot.investigators,
         sellers: snapshot.sellers,
@@ -622,15 +624,7 @@ function RecordModal({
     const previousAssignment = [...normalizedAssignments].reverse().find((item) => item.id !== currentAssignment?.id);
     const journalAccesses = draft.journalAccesses.filter((item) => [item.journal, item.journalLink, item.loginLink, item.username, item.password].some((value) => value.trim()));
     const driveFiles = draft.driveFiles.filter((item) => item.name.trim() || item.url.trim());
-    const clientPayments = draft.clientPayments.map((payment) => {
-      const amount = Math.max(0, Number(payment.amount) || 0);
-      const rawPaid = Math.max(0, Number(payment.paidAmount) || 0);
-      const paidAmount = amount > 0 ? Math.min(rawPaid, amount) : rawPaid;
-      const status: ClientPayment["status"] = paidAmount > 0
-        ? amount <= 0 || paidAmount >= amount ? "pagado" : "parcial"
-        : payment.status === "vencido" ? "vencido" : "pendiente";
-      return { ...payment, amount, paidAmount, status };
-    });
+    const clientPayments = draft.clientPayments.map((payment) => normalizeClientPayment(payment));
     const clientTotal = Math.max(0, Number(draft.clientTotal) || 0);
     const receivedFromClient = clientPayments.reduce((sum, payment) => sum + payment.paidAmount, 0);
     const outstandingBalance = clientTotal > 0
@@ -783,15 +777,16 @@ function RecordModal({
               <label className="apc-toggle"><span>APC</span><span className="toggle-row"><input type="checkbox" checked={draft.hasApc} onChange={(event) => { set("hasApc", event.target.checked); if (!event.target.checked) set("apcValue", 0); }} /><strong>{draft.hasApc ? "Con APC" : "Sin APC"}</strong></span></label>
               {draft.hasApc && <label>Valor APC (USD)<DecimalInput value={draft.apcValue} onValue={(value) => set("apcValue", value)} /></label>}
             </div>
-            <div className="section-heading"><div><h3>Pagos del cliente</h3><p>Cronograma e historial de abonos.</p></div><button type="button" className="button secondary small" onClick={() => setDraft((current) => ({ ...current, clientPayments: [...current.clientPayments, blankPayment()] }))}><Plus size={15} /> Añadir pago</button></div>
+            <div className="section-heading"><div><h3>Pagos del cliente</h3><p>Registre en “Valor recibido” cada abono efectivamente cobrado.</p></div><div className="payment-actions"><button type="button" className="button primary small" onClick={() => setDraft((current) => ({ ...current, clientPayments: [...current.clientPayments, blankReceivedPayment()] }))}><Plus size={15} /> Registrar abono recibido</button><button type="button" className="button secondary small" onClick={() => setDraft((current) => ({ ...current, clientPayments: [...current.clientPayments, blankPayment()] }))}><CalendarClock size={15} /> Añadir cuota pendiente</button></div></div>
             <div className="payment-editor">
               {draft.clientPayments.length === 0 && <p className="muted center">No existen pagos registrados.</p>}
               {draft.clientPayments.map((payment) => <div className="payment-row" key={payment.id}>
-                <input aria-label="Concepto" value={payment.concept} onChange={(event) => updatePayment(payment.id, { concept: event.target.value })} />
-                <DecimalInput ariaLabel="Valor previsto" value={payment.amount} onValue={(amount) => updatePayment(payment.id, { amount, paidAmount: payment.status === "pagado" ? amount : payment.paidAmount })} />
-                <DecimalInput ariaLabel="Valor pagado" value={payment.paidAmount} onValue={(paidAmount) => updatePayment(payment.id, { paidAmount, status: paidAmount <= 0 ? "pendiente" : payment.amount > 0 && paidAmount >= payment.amount ? "pagado" : "parcial", paidDate: paidAmount > 0 ? payment.paidDate || new Date().toISOString().slice(0, 10) : "" })} />
-                <input aria-label="Fecha prevista" type="date" value={payment.scheduledDate} onChange={(event) => updatePayment(payment.id, { scheduledDate: event.target.value })} />
-                <select aria-label="Estado" value={payment.status} onChange={(event) => { const status = event.target.value as ClientPayment["status"]; updatePayment(payment.id, { status, paidAmount: status === "pagado" ? payment.amount : status === "pendiente" || status === "vencido" ? 0 : payment.paidAmount, paidDate: status === "pagado" || status === "parcial" ? payment.paidDate || new Date().toISOString().slice(0, 10) : "" }); }}><option value="pendiente">Pendiente</option><option value="parcial">Parcial</option><option value="pagado">Pagado</option><option value="vencido">Vencido</option></select>
+                <label><span>Concepto</span><input aria-label="Concepto" value={payment.concept} onChange={(event) => updatePayment(payment.id, { concept: event.target.value })} /></label>
+                <label><span>Valor de la cuota</span><DecimalInput ariaLabel="Valor de la cuota" value={payment.amount} onValue={(amount) => updatePayment(payment.id, { amount, paidAmount: payment.status === "pagado" ? amount : Math.min(payment.paidAmount, amount || payment.paidAmount) })} /></label>
+                <label><span>Valor recibido</span><DecimalInput ariaLabel="Valor recibido" value={payment.paidAmount} onValue={(paidAmount) => { const amount = payment.amount > 0 ? payment.amount : paidAmount; updatePayment(payment.id, { amount, paidAmount, status: paidAmount <= 0 ? "pendiente" : amount > 0 && paidAmount >= amount ? "pagado" : "parcial", paidDate: paidAmount > 0 ? payment.paidDate || new Date().toISOString().slice(0, 10) : "" }); }} /></label>
+                <label><span>Fecha prevista</span><input aria-label="Fecha prevista" type="date" value={payment.scheduledDate} onChange={(event) => updatePayment(payment.id, { scheduledDate: event.target.value })} /></label>
+                <label><span>Fecha recibida</span><input aria-label="Fecha recibida" type="date" value={payment.paidDate} onChange={(event) => updatePayment(payment.id, { paidDate: event.target.value })} /></label>
+                <label><span>Estado</span><select aria-label="Estado" value={payment.status} onChange={(event) => { const status = event.target.value as ClientPayment["status"]; updatePayment(payment.id, { status, paidAmount: status === "pagado" ? payment.amount : status === "pendiente" || status === "vencido" ? 0 : payment.paidAmount, paidDate: status === "pagado" || status === "parcial" ? payment.paidDate || new Date().toISOString().slice(0, 10) : "" }); }}><option value="pendiente">Pendiente</option><option value="parcial">Parcial</option><option value="pagado">Pagado</option><option value="vencido">Vencido</option></select></label>
                 <button type="button" className="icon-button danger" onClick={() => removePayment(payment.id)}><Trash2 size={16} /></button>
               </div>)}
             </div>
@@ -1662,13 +1657,13 @@ export default function EditorialApp() {
     }
   };
   const saveGoogleConfig = async (config: GoogleSheetsConfig) => {
-    await persist(addAudit({ ...data, googleSheets: config, version: 7 }, "Google Sheets", "Configuración de sincronización actualizada"));
+    await persist(addAudit({ ...data, googleSheets: config, version: 8 }, "Google Sheets", "Configuración de sincronización actualizada"));
   };
   const saveInvestigators = async (investigators: Investigator[]) => {
-    await persist(addAudit({ ...data, investigators, version: 7 }, "Investigadores", `Catálogo actualizado: ${investigators.length} registros`));
+    await persist(addAudit({ ...data, investigators, version: 8 }, "Investigadores", `Catálogo actualizado: ${investigators.length} registros`));
   };
   const saveSellers = async (sellers: Seller[]) => {
-    await persist(addAudit({ ...data, sellers, version: 7 }, "Vendedores", `Catálogo actualizado: ${sellers.length} registros`));
+    await persist(addAudit({ ...data, sellers, version: 8 }, "Vendedores", `Catálogo actualizado: ${sellers.length} registros`));
   };
   const title = NAV_ITEMS.find((item) => item.key === view)?.label || "Control editorial";
 

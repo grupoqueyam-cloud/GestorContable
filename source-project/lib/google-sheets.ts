@@ -1,7 +1,6 @@
 import type {
   AppData,
   AuditEntry,
-  ClientPayment,
   DeletedRecord,
   EditorialRecord,
   GoogleSheetsConfig,
@@ -12,8 +11,9 @@ import type {
   JournalAccess,
   Seller,
 } from "./types";
+import { normalizeClientPayments } from "./format";
 
-const REQUIRED_SCHEMA_VERSION = 5;
+const REQUIRED_SCHEMA_VERSION = 6;
 
 export interface GoogleSheetsSnapshot {
   schemaVersion: number;
@@ -119,30 +119,6 @@ const normalizeInstallment = (
     status: installmentStatus(paidAmount, amount),
   };
 };
-
-const normalizeClientPayments = (record: EditorialRecord): ClientPayment[] =>
-  (Array.isArray(record.clientPayments) ? record.clientPayments : []).map((payment, index) => {
-    const amount = Math.max(0, Number(payment.amount) || 0);
-    const storedPaid = Number(payment.paidAmount);
-    const paidAmount = Number.isFinite(storedPaid)
-      ? Math.max(0, storedPaid)
-      : payment.status === "pagado"
-        ? amount
-        : 0;
-    const status = paidAmount > 0
-      ? amount <= 0 || paidAmount >= amount ? "pagado" : "parcial"
-      : payment.status === "vencido" ? "vencido" : "pendiente";
-    return {
-      id: payment.id || `${record.id || "payment"}-${index + 1}`,
-      concept: payment.concept || "Pago",
-      scheduledDate: payment.scheduledDate || "",
-      paidDate: payment.paidDate || "",
-      amount,
-      paidAmount,
-      status,
-      note: payment.note || "",
-    };
-  });
 
 const legacyAssignments = (record: EditorialRecord): InvestigatorAssignment[] => {
   const currentInvestigator = String(record.investigator || "").trim();
@@ -347,7 +323,7 @@ export const normalizeAppData = (data: AppData): AppData => {
   });
   return {
     ...data,
-    version: 7,
+    version: 8,
     records,
     investigators: Array.isArray(data.investigators) ? data.investigators.map(normalizeInvestigator) : [],
     sellers: sellers.sort((a, b) => a.name.localeCompare(b.name, "es")),
@@ -385,6 +361,48 @@ const preserveJournalCredentials = (selected: EditorialRecord, other: EditorialR
   });
 };
 
+const paymentKey = (payment: EditorialRecord["clientPayments"][number], index: number) =>
+  payment.id || `${payment.concept}|${payment.scheduledDate}|${payment.paidDate}|${payment.amount}|${index}`;
+
+const mergeClientPayments = (preferred: EditorialRecord, other: EditorialRecord) => {
+  const merged = new Map<string, EditorialRecord["clientPayments"][number]>();
+  [...other.clientPayments, ...preferred.clientPayments].forEach((raw, index) => {
+    const payment = normalizeClientPayments({
+      ...preferred,
+      clientPayments: [raw],
+    })[0];
+    if (!payment) return;
+    const key = paymentKey(payment, index);
+    const current = merged.get(key);
+    if (!current) {
+      merged.set(key, payment);
+      return;
+    }
+    const amount = Math.max(current.amount, payment.amount);
+    const paidAmount = Math.max(current.paidAmount, payment.paidAmount);
+    merged.set(key, {
+      ...current,
+      ...payment,
+      amount,
+      paidAmount,
+      status: paidAmount <= 0
+        ? (payment.status === "vencido" || current.status === "vencido" ? "vencido" : "pendiente")
+        : amount <= 0 || paidAmount >= amount ? "pagado" : "parcial",
+      paidDate: payment.paidDate || current.paidDate,
+      note: payment.note || current.note,
+    });
+  });
+  return [...merged.values()];
+};
+
+const preserveLeadingZeroIdentifier = (preferred: string, other: string) => {
+  const selected = String(preferred ?? "");
+  const alternative = String(other ?? "");
+  if (!selected) return alternative;
+  if (!/^0+\d+$/.test(alternative) || !/^\d+$/.test(selected)) return selected;
+  return alternative.replace(/^0+/, "") === selected.replace(/^0+/, "") ? alternative : selected;
+};
+
 const mergeRecord = (
   local: EditorialRecord | undefined,
   remote: EditorialRecord | undefined,
@@ -394,12 +412,20 @@ const mergeRecord = (
   const remoteWins = isoTime(remote.updatedAt) > isoTime(local.updatedAt);
   const selected = normalizeRecord(remoteWins ? remote : local);
   const other = normalizeRecord(remoteWins ? local : remote);
-  return {
+  return normalizeRecord({
     ...selected,
     username: selected.username || other.username,
     password: selected.password || other.password,
     journalAccesses: preserveJournalCredentials(selected, other),
-  };
+    clientPayments: mergeClientPayments(selected, other),
+    contractNumber: preserveLeadingZeroIdentifier(selected.contractNumber, other.contractNumber),
+    productionOrder: preserveLeadingZeroIdentifier(selected.productionOrder, other.productionOrder),
+    clientId: preserveLeadingZeroIdentifier(selected.clientId, other.clientId),
+    investigatorInvoiceNumber: preserveLeadingZeroIdentifier(
+      selected.investigatorInvoiceNumber,
+      other.investigatorInvoiceNumber,
+    ),
+  });
 };
 
 const mergeInvestigators = (local: Investigator[], remote: Investigator[]) => {
@@ -605,7 +631,7 @@ export const syncGoogleSheets = async (source: AppData): Promise<SyncResult> => 
       return {
         data: normalizeAppData({
           ...merged,
-          version: 7,
+          version: 8,
           googleSheets: { ...config, remoteRevision, lastSyncAt },
         }),
         remoteRevision,

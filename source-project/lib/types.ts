@@ -168,7 +168,7 @@ export interface GoogleSheetsConfig {
 }
 
 export interface AppData {
-  version: 2 | 3 | 4 | 5 | 6 | 7;
+  version: 2 | 3 | 4 | 5 | 6 | 7 | 8;
   records: EditorialRecord[];
   investigators: Investigator[];
   sellers: Seller[];

@@ -356,13 +356,18 @@ const parseControlSheet = (
 const worksheetToMatrix = (worksheet: {
   rowCount: number;
   columnCount: number;
-  getRow: (index: number) => { getCell: (column: number) => { value: unknown } };
+  getRow: (index: number) => {
+    getCell: (column: number) => { value: unknown; text?: string; numFmt?: string };
+  };
 }) => {
   const matrix: Matrix = [];
   for (let row = 1; row <= worksheet.rowCount; row += 1) {
     const values: CellValue[] = [];
     for (let column = 1; column <= worksheet.columnCount; column += 1) {
-      values.push(worksheet.getRow(row).getCell(column).value);
+      const source = worksheet.getRow(row).getCell(column);
+      const format = String(source.numFmt || "").split(";")[0].trim();
+      const preservesLeadingZeros = typeof source.value === "number" && /^0{2,}$/.test(format);
+      values.push(preservesLeadingZeros && source.text ? source.text : source.value);
     }
     matrix.push(values);
   }
@@ -402,7 +407,7 @@ export const importExcelFiles = async (
 };
 
 export const makeEmptyData = (): AppData => ({
-  version: 7,
+  version: 8,
   records: [],
   investigators: [],
   sellers: [],

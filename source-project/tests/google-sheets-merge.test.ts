@@ -14,7 +14,7 @@ const record = (id: string, client: string, updatedAt: string): EditorialRecord 
 });
 
 const base = (records: EditorialRecord[]): AppData => normalizeAppData({
-  version: 7,
+  version: 8,
   records,
   investigators: [],
   sellers: [],
@@ -28,7 +28,7 @@ test("combina por ID y conserva la version mas reciente", () => {
   const remoteA = record("a", "Cliente remoto antiguo", "2026-01-01T00:00:00.000Z");
   const remoteB = record("b", "Cliente remoto", "2026-03-01T00:00:00.000Z");
   const merged = mergeGoogleSnapshot(local, {
-    schemaVersion: 5,
+    schemaVersion: 6,
     revision: 4,
     serverTime: "2026-03-01T00:00:00.000Z",
     records: [remoteA, remoteB],
@@ -47,7 +47,7 @@ test("respeta eliminaciones y no borra credenciales de acceso omitidas", () => {
   const localB = record("b", "Eliminar", "2026-02-01T00:00:00.000Z");
   const remoteA = { ...localA, client: "Cliente actualizado", username: "", password: "", journalAccesses: localA.journalAccesses.map((item) => ({ ...item, username: "", password: "" })), updatedAt: "2026-03-01T00:00:00.000Z" };
   const merged = mergeGoogleSnapshot(base([localA, localB]), {
-    schemaVersion: 5,
+    schemaVersion: 6,
     revision: 8,
     serverTime: "2026-04-01T00:00:00.000Z",
     records: [remoteA],
@@ -90,7 +90,7 @@ test("migra campos anteriores al formato unificado", () => {
     deletedRecords: [],
     importedAt: "2025-01-01T00:00:00.000Z",
   });
-  assert.equal(normalized.version, 7);
+  assert.equal(normalized.version, 8);
   assert.equal(normalized.records[0].contractStartDate, "2025-02-01");
   assert.equal(normalized.records[0].contractEndDate, "");
   assert.equal(normalized.records[0].hasApc, true);
@@ -110,7 +110,7 @@ test("agrupa y conserva el investigador con la actualización más reciente", ()
   const local = base([]);
   local.investigators = [{ id: "i-1", name: "Ana Pérez", documentId: "", email: "", phone: "", specialty: "Local", startDate: "", endDate: "", driveFolderUrl: "", notes: "", active: true, createdAt: "2026-01-01T00:00:00.000Z", updatedAt: "2026-01-01T00:00:00.000Z" }];
   const merged = mergeGoogleSnapshot(local, {
-    schemaVersion: 5,
+    schemaVersion: 6,
     revision: 2,
     serverTime: "2026-02-01T00:00:00.000Z",
     records: [],
@@ -246,6 +246,42 @@ test("migra pagos antiguos marcados como pagados al nuevo valor pagado", () => {
   assert.equal(clientBalance(normalized), 0);
 });
 
+test("recupera un pago marcado pagado aunque Valor pagado llegue como cero", () => {
+  const process = record("paid-zero", "Cliente pagado", "2026-06-01T00:00:00.000Z");
+  process.clientTotal = 750;
+  process.outstandingBalance = 750;
+  process.clientPayments = [{
+    id: "paid-zero-payment",
+    concept: "Pago total",
+    scheduledDate: "",
+    paidDate: "2026-05-01",
+    amount: 750,
+    paidAmount: 0,
+    status: "pagado",
+    note: "",
+  }];
+  const normalized = normalizeAppData(base([process])).records[0];
+  assert.equal(normalized.clientPayments[0].paidAmount, 750);
+  assert.equal(normalized.clientPayments[0].status, "pagado");
+  assert.equal(paidByClient(normalized), 750);
+  assert.equal(clientBalance(normalized), 0);
+});
+
+test("infiere el abono histórico cuando existe total y un saldo menor", () => {
+  const process = record("balance-inference", "Pilapaña Maldonado", "2026-06-01T00:00:00.000Z");
+  process.clientTotal = 1350;
+  process.outstandingBalance = 750;
+  process.nextPaymentAmount = 750;
+  process.clientPayments = [];
+
+  const normalized = normalizeAppData(base([process])).records[0];
+  assert.equal(normalized.clientPayments.length, 1);
+  assert.equal(normalized.clientPayments[0].paidAmount, 600);
+  assert.equal(paidByClient(normalized), 600);
+  assert.equal(clientBalance(normalized), 750);
+  assert.equal(clientPaymentState(normalized), "parcial");
+});
+
 test("descuenta un abono aunque el estado recibido todavía diga pendiente", () => {
   const process = record("stale-payment-status", "Cliente abono", "2026-06-01T00:00:00.000Z");
   process.clientTotal = 1000;
@@ -267,6 +303,42 @@ test("descuenta un abono aunque el estado recibido todavía diga pendiente", () 
   const normalized = normalizeAppData(base([process])).records[0];
   assert.equal(normalized.clientPayments[0].status, "parcial");
   assert.equal(normalized.outstandingBalance, 725);
+});
+
+test("la conciliación no elimina pagos remotos aunque el registro local sea más reciente", () => {
+  const local = record("preserve-payment", "Cliente conciliado", "2026-07-10T00:00:00.000Z");
+  local.clientTotal = 1000;
+  local.outstandingBalance = 1000;
+  local.contractNumber = "444";
+  local.clientPayments = [];
+  const remote = record("preserve-payment", "Cliente conciliado", "2026-07-09T00:00:00.000Z");
+  remote.clientTotal = 1000;
+  remote.outstandingBalance = 600;
+  remote.contractNumber = "000444";
+  remote.clientPayments = [{
+    id: "remote-payment",
+    concept: "Abono recibido",
+    scheduledDate: "",
+    paidDate: "2026-07-09",
+    amount: 400,
+    paidAmount: 400,
+    status: "pagado",
+    note: "",
+  }];
+
+  const merged = mergeGoogleSnapshot(base([local]), {
+    schemaVersion: 6,
+    revision: 12,
+    serverTime: "2026-07-10T01:00:00.000Z",
+    records: [remote],
+    investigators: [],
+    sellers: [],
+    auditLog: [],
+    deletedRecords: [],
+  }).records[0];
+  assert.equal(paidByClient(merged), 400);
+  assert.equal(clientBalance(merged), 600);
+  assert.equal(merged.contractNumber, "000444");
 });
 
 test("migra vendedor y conserva país y origen del cliente", () => {
