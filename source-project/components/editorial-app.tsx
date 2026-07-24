@@ -720,7 +720,7 @@ function RecordModal({
             <div className="form-grid three-cols">
               <label>N.º de contrato<input inputMode="numeric" placeholder="Ej. 000150" value={draft.contractNumber} onChange={(event) => set("contractNumber", event.target.value)} /></label>
               <label>Inicio del contrato *<input type="date" value={draft.contractStartDate} onChange={(event) => set("contractStartDate", event.target.value)} required /></label>
-              <label>Fin del contrato<input type="date" value={draft.contractEndDate} min={draft.contractStartDate} onChange={(event) => set("contractEndDate", event.target.value)} /></label>
+              <label>Fin del contrato (opcional)<input type="date" value={draft.contractEndDate} min={draft.contractStartDate} onChange={(event) => set("contractEndDate", event.target.value)} /></label>
               <label className="span-2">Link del contrato<input type="url" value={draft.contractLink} onChange={(event) => set("contractLink", event.target.value)} placeholder="https://drive.google.com/..." /></label>
               <label>Orden de producción<input inputMode="numeric" placeholder="Ej. 000045" value={draft.productionOrder} onChange={(event) => set("productionOrder", event.target.value)} /></label>
               <label className="span-3">Tema / título<textarea value={draft.topic} onChange={(event) => set("topic", event.target.value)} rows={3} /></label>
