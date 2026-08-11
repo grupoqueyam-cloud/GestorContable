@@ -2,6 +2,61 @@
 
 Sistema web para controlar clientes, contratos, procesos editoriales, recuperación de cartera, pagos, investigadores, revistas y credenciales de acceso. La interfaz se publica en GitHub Pages y Google Sheets funciona como la única base de datos persistente.
 
+> **Documento principal del repositorio.** Esta guía permite instalar, publicar, actualizar, operar, verificar y dar mantenimiento al sistema. Para una entrega formal se incluyen además el [Manual de usuario](manuales/MANUAL_DE_USUARIO.md), el [Manual técnico](manuales/MANUAL_TECNICO.md), la [Guía de instalación y despliegue](manuales/GUIA_INSTALACION_Y_DESPLIEGUE.md) y el [Diccionario de datos](manuales/DICCIONARIO_DE_DATOS.md).
+
+> **Entrega en Microsoft Word.** La carpeta [`manuales/word/`](manuales/word/) contiene el documento maestro de 77 páginas y las versiones Word independientes del README, manual de usuario, manual técnico, guía de instalación y diccionario de datos.
+
+## Documentación de entrega
+
+| Documento | Destinatario | Contenido |
+|---|---|---|
+| [`README.md`](README.md) | Propietario del repositorio, administrador y evaluador | Descripción general, instalación resumida, operación, seguridad, actualización, respaldo y solución de problemas. |
+| [`manuales/MANUAL_DE_USUARIO.md`](manuales/MANUAL_DE_USUARIO.md) | Personal administrativo, contable, editorial y comercial | Uso diario de todos los módulos, pagos, cartera, investigadores, vendedores, filtros, archivos y exportaciones. |
+| [`manuales/MANUAL_TECNICO.md`](manuales/MANUAL_TECNICO.md) | Desarrollador o responsable de soporte | Arquitectura, modelo de datos, sincronización, reglas de negocio, código fuente, pruebas, seguridad y mantenimiento. |
+| [`manuales/GUIA_INSTALACION_Y_DESPLIEGUE.md`](manuales/GUIA_INSTALACION_Y_DESPLIEGUE.md) | Administrador de GitHub y Google Workspace | Instalación nueva, actualización sin pérdida de datos, publicación de Apps Script y GitHub Pages, verificación y reversión. |
+| [`manuales/DICCIONARIO_DE_DATOS.md`](manuales/DICCIONARIO_DE_DATOS.md) | Administrador de la base, analista o desarrollador | Pestañas, campos, tipos, obligatoriedad, relaciones, valores permitidos y fórmulas calculadas. |
+| [`manuales/word/Documentacion_Completa_Gestor_Contable.docx`](manuales/word/Documentacion_Completa_Gestor_Contable.docx) | Entrega institucional | Compilación en Word del README, manual de usuario, manual técnico, guía de instalación y diccionario de datos. |
+
+## Ficha técnica de la entrega
+
+| Componente | Versión o condición |
+|---|---|
+| Aplicación web | Modelo de datos interno `8` |
+| Base de Google Sheets | Esquema `6` |
+| Frontend | React `19.2.6`, TypeScript `5.9.3`, Vite `8.0.13` |
+| Backend | Google Apps Script vinculado a la hoja |
+| Almacenamiento persistente | Exclusivamente Google Sheets |
+| Hosting | GitHub Pages, sitio estático |
+| Sincronización automática | Cada 20 minutos, además de los guardados inmediatos |
+| Moneda de presentación | USD, formato regional `es-EC` |
+| Navegadores recomendados | Chrome, Edge o Firefox actuales con JavaScript habilitado |
+| Autenticación disponible | Clave compartida `SYNC_SECRET` por sesión |
+
+## Tabla de contenido
+
+1. [Estado del software](#1-estado-del-software)
+2. [Arquitectura](#2-arquitectura)
+3. [Funciones incluidas](#3-funciones-incluidas)
+4. [Información administrada](#4-información-administrada)
+5. [Publicación en GitHub Pages](#5-publicación-en-github-pages)
+6. [Actualizar o crear la base](#6-actualizar-o-crear-la-base-en-google-sheets)
+7. [Configurar la clave privada](#7-configurar-la-clave-privada)
+8. [Crear las pestañas](#8-crear-las-pestañas-de-la-base)
+9. [Publicar Google Apps Script](#9-publicar-google-apps-script)
+10. [Preconfigurar la URL](#10-preconfigurar-la-url)
+11. [Primera conexión](#11-primera-conexión)
+12. [Importar los Excel iniciales](#12-importar-los-excel-iniciales)
+13. [Uso diario](#13-uso-diario)
+14. [Sincronización y trabajo simultáneo](#14-sincronización-y-trabajo-simultáneo)
+15. [Seguridad](#15-seguridad)
+16. [Solución de problemas](#16-solución-de-problemas)
+17. [Estructura del paquete](#17-estructura-del-paquete)
+18. [Actualizaciones y respaldos](#18-actualizaciones-y-respaldos)
+19. [Comprobación final](#19-comprobación-final)
+20. [Desarrollo, pruebas y compilación](#20-desarrollo-pruebas-y-compilación)
+21. [Reglas contables esenciales](#21-reglas-contables-esenciales)
+22. [Alcance y limitaciones](#22-alcance-y-limitaciones)
+
 ## 1. Estado del software
 
 El software está compilado y listo para publicarse. No necesita instalar Node.js, ejecutar comandos ni mantener un servidor propio para usarlo.
@@ -442,7 +497,20 @@ GestorContable/
 ├── cloud-config.json          URL pública de Apps Script
 ├── favicon.svg                icono del sitio
 ├── .nojekyll                  evita procesamiento de Jekyll
-├── README.md                  este manual
+├── README.md                  documentación principal para GitHub
+├── manuales/                  documentación formal de entrega
+│   ├── README.md              índice documental
+│   ├── MANUAL_DE_USUARIO.md
+│   ├── MANUAL_TECNICO.md
+│   ├── GUIA_INSTALACION_Y_DESPLIEGUE.md
+│   ├── DICCIONARIO_DE_DATOS.md
+│   └── word/                  documentación completa en Microsoft Word
+│       ├── Documentacion_Completa_Gestor_Contable.docx
+│       ├── README_Gestor_Contable.docx
+│       ├── Manual_de_Usuario_Gestor_Contable.docx
+│       ├── Manual_Tecnico_Gestor_Contable.docx
+│       ├── Guia_de_Instalacion_y_Despliegue.docx
+│       └── Diccionario_de_Datos_Gestor_Contable.docx
 ├── google-apps-script/
 │   └── Code.gs                servicio de Google Sheets
 └── source-project/            código fuente completo de React y TypeScript
@@ -474,3 +542,116 @@ El sistema está correctamente configurado cuando:
 - Un proceso admite más de una revista y más de un archivo de Drive.
 - Un registro nuevo aparece inmediatamente en la hoja.
 - Al recargar la página, se solicita nuevamente la clave y los datos vuelven a descargarse desde Google Sheets.
+
+## 20. Desarrollo, pruebas y compilación
+
+Estas instrucciones son para mantenimiento técnico. No son necesarias para operar el sistema compilado.
+
+### Requisitos
+
+- Node.js `22.13.0` o superior.
+- npm incluido con Node.js.
+- Una copia del repositorio.
+
+### Preparar el código fuente
+
+```bash
+cd source-project
+npm ci
+```
+
+### Ejecutar en desarrollo
+
+```bash
+npm run dev
+```
+
+Vite mostrará una URL local únicamente para desarrollo. La aplicación seguirá necesitando el servicio de Apps Script para acceder a datos reales. No se debe confundir este servidor temporal con el despliegue de producción.
+
+### Ejecutar las verificaciones
+
+```bash
+npm test
+npm run lint
+npx tsc --noEmit
+```
+
+La prueba completa compila el sitio y verifica:
+
+- que el HTML generado use recursos compilados y no intente ejecutar `src/main.tsx`;
+- que no exista persistencia en `localStorage` o IndexedDB;
+- que la conciliación conserve pagos, eliminaciones, credenciales protegidas e identificadores con cero inicial;
+- que las reglas de pagos parciales, completos e históricos produzcan el saldo correcto.
+
+### Compilar para GitHub Pages
+
+```bash
+npm run build:github
+```
+
+El resultado queda en `source-project/docs/`. La configuración `base: "./"` genera rutas relativas compatibles con repositorios publicados en subcarpetas de GitHub Pages. Para una publicación manual desde la raíz, copie los archivos generados a la raíz del repositorio y conserve `.nojekyll`.
+
+El flujo incluido en `source-project/.github/workflows/deploy-pages.yml` permite otra modalidad: si `source-project` se usa como raíz de un repositorio independiente, GitHub Actions instala, compila y publica la carpeta `docs` mediante `actions/upload-pages-artifact@v4` y `actions/deploy-pages@v4`.
+
+## 21. Reglas contables esenciales
+
+### Recaudación del cliente
+
+Para cada pago se distinguen dos valores:
+
+- **Valor de la cuota:** obligación o valor esperado.
+- **Valor recibido:** dinero efectivamente cobrado.
+
+La recaudación del contrato es la suma de los valores efectivamente recibidos, limitada al valor de cada cuota cuando esta tenga un valor previsto. El saldo se calcula así:
+
+```text
+recaudación = suma(valor recibido de cada pago)
+saldo pendiente = máximo(0, total contratado - recaudación)
+```
+
+El estado económico se deriva del resultado, no de una etiqueta manual aislada:
+
+| Condición | Estado calculado |
+|---|---|
+| Recaudación igual o superior al total y total mayor que cero | Pagado completo |
+| Recaudación mayor que cero y saldo mayor que cero | Pago parcial |
+| Recaudación igual a cero | Pendiente de pago |
+
+Al marcar una cuota como `Pagado`, el sistema asigna su valor previsto como valor recibido. Al escribir un valor recibido menor que la cuota, la marca como `Parcial`. Al volverla `Pendiente` o `Vencido`, el valor recibido se establece en cero. La interfaz, Apps Script y la migración aplican la misma normalización.
+
+### Recuperación de pagos históricos
+
+Si un registro antiguo no contiene filas de pagos, pero sí contiene total contratado y un saldo inferior al total, se infiere el pago histórico:
+
+```text
+pago histórico inferido = total contratado - saldo anterior
+```
+
+La operación se realiza durante la normalización/migración para evitar que una recaudación ya realizada desaparezca del dashboard.
+
+### Pagos al investigador
+
+Cada asignación conserva su propio honorario y modalidad:
+
+- `Pago único`: el primer abono debe coincidir con el honorario; el segundo queda en cero.
+- `Dos abonos`: la suma de los dos valores previstos debe coincidir con el honorario acordado.
+
+El pendiente del investigador se calcula como honorario acordado menos la suma pagada, sin producir valores negativos.
+
+### Ceros a la izquierda
+
+`Número de contrato`, `Orden de producción`, `Documento del cliente`, `Documento del investigador`, `Documento del vendedor` y `Número de factura del investigador` son identificadores de texto. No son valores matemáticos. El formulario usa entradas textuales, la sincronización conserva la versión con cero inicial y Apps Script aplica formato `@` en Google Sheets.
+
+Google Sheets no puede reconstruir automáticamente ceros que una versión anterior ya haya eliminado. En ese caso, después de ejecutar `configurarHojas`, escriba nuevamente el identificador completo; por ejemplo, `000444`.
+
+## 22. Alcance y limitaciones
+
+- El sistema es una aplicación administrativa de control; no reemplaza un software tributario, bancario o de facturación electrónica.
+- Los valores se muestran en USD y no existe conversión automática de monedas.
+- La versión entregada usa una clave compartida. No ofrece cuentas personales, doble factor, roles ni permisos por módulo.
+- Las credenciales de revistas no están cifradas dentro de Google Sheets. Deben cargarse solo cuando sea necesario y la hoja debe ser privada.
+- Los archivos de Drive no se almacenan ni se copian: se registra su URL y la vista previa depende de los permisos de Google.
+- GitHub Pages sirve archivos públicos y estáticos. Nunca debe contener `SYNC_SECRET`, datos de clientes ni copias de la hoja.
+- La fecha final del contrato es opcional. Las fechas de inicio y fin de cada asignación de investigador sí son obligatorias cuando el proceso deja de estar `Por asignar`.
+- La edición directa de filas en Google Sheets es posible, pero debe respetar encabezados, tipos y valores permitidos. Se recomienda operar desde la interfaz para mantener validaciones, trazabilidad y relaciones.
+- No se incluye una licencia de software de código abierto. Si el repositorio será público y se desea autorizar reutilización, el propietario debe agregar un archivo `LICENSE` con la licencia aprobada por su organización.
